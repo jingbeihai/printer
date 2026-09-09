@@ -1,0 +1,5 @@
+0000000000000000000000000000000000000000 9d5de0fac4fbd31a779f9aee74ccaa21e38697a9 Codex <codex@local> 1788955111 +0800	commit (initial): Build C5560 interactive print management prototype
+9d5de0fac4fbd31a779f9aee74ccaa21e38697a9 1514bbb972b2a5113f314b83461ed8cd572a4e03 Codex <codex@local> 1788955216 +0800	commit: Exclude generated TypeScript cache
+1514bbb972b2a5113f314b83461ed8cd572a4e03 ce5199441c7775391aad6d1932794ec326b8530a Codex <codex@local> 1788961302 +0800	commit: Expand print management prototype workflows
+ce5199441c7775391aad6d1932794ec326b8530a dd63d115426cf453ada6f86150ed7bbcc33f492d Codex <codex@local> 1788962560 +0800	commit: Add multi-printer selection and queue cancellation
+dd63d115426cf453ada6f86150ed7bbcc33f492d 6c4ed87dd7191d2527f12868878681117d61ab27 Codex <codex@local> 1788963637 +0800	commit: Add school CRUD and automatic PDF page detection
