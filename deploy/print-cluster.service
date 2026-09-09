@@ -1,0 +1,18 @@
+[Unit]
+Description=Canon Print Cluster API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=printcluster
+Group=printcluster
+WorkingDirectory=/opt/print-cluster
+EnvironmentFile=/etc/print-cluster.env
+ExecStart=/opt/print-cluster/.venv/bin/python run.py server
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

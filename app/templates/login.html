@@ -1,0 +1,21 @@
+{% extends "base.html" %}{% block title %}登录 · 打印任务中心{% endblock %}
+{% block body %}
+<section class="auth-shell">
+  <div class="card auth-card">
+    <div class="auth-top">
+      <div class="eyebrow">Print Operations</div>
+      <h1>打印任务中心</h1>
+      <p>提交、排队、追踪，每一份资料都有清晰去向。</p>
+    </div>
+    <div class="auth-body">
+      {% if error %}<div class="err">{{ error }}</div>{% endif %}
+      <form method="post">
+        <label>用户名<input name="username" autocomplete="username" placeholder="请输入用户名" required autofocus></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required></label>
+        <button>登录任务中心</button>
+      </form>
+      <p class="muted auth-foot">还没有账号？<a href="/register">使用邀请码注册</a></p>
+    </div>
+  </div>
+</section>
+{% endblock %}

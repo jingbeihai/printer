@@ -1,0 +1,54 @@
+{% extends "base.html" %}{% block title %}任务队列{% endblock %}
+{% block nav %}
+<a href="/queue" class="on">任务队列</a><a href="/submit">提交任务</a>
+<a href="/dashboard">数据统计</a>{% if user.role=='admin' %}<a href="/admin">后台管理</a>{% endif %}
+<span class="right">{{ user.username }} · <a href="/logout">退出</a></span>
+{% endblock %}
+{% block body %}
+<header class="page-heading"><h1>打印任务队列</h1><p>按优先级与提交顺序执行，现场状态会自动同步。</p></header>
+<div class="card accent">
+  <div class="section-head"><h2>等待处理 · {{ tasks|length }}</h2><a class="btn" href="/submit">＋ 提交任务</a></div>
+  {% if not tasks %}<div class="empty"><strong>队列已经清空</strong>当前没有等待打印的任务。</div>{% endif %}
+  {% if tasks %}
+  <div class="table-wrap">
+  <table>
+    <tr><th>#</th><th>任务</th><th>学校/年级</th><th>班级数</th><th>份数</th><th>页数</th>
+        <th>估算张数</th><th>提交人</th><th>状态</th>{% if admin %}<th>操作</th>{% endif %}</tr>
+    {% for t in tasks %}
+    <tr>
+      <td>{{ loop.index }}{% if t.priority>0 %} <span class="tag" style="background:#c62828">置顶</span>{% endif %}</td>
+      <td>{{ t.title }}{% if t.note %}<div class="muted">{{ t.note }}</div>{% endif %}</td>
+      <td>{{ t.school }} {{ t.grade }}</td><td>{{ t.classes }}</td>
+      <td>{{ t.copies }}</td><td>{{ t.pages }}</td><td>{{ t.sheets }}</td>
+      <td>{{ t.source_user }}</td>
+      <td><span class="tag" style="background:{{ {'QUEUED':'#94a3b8','PRINTING':'#1565c0','AWAITING_PICKUP':'#f9a825'}[t.status] }}">{{ cn[t.status] }}</span></td>
+      {% if admin %}
+      <td class="nowrap">
+        <form method="post" action="/admin/task/{{ t.id }}/top" class="inline-form">
+          <button class="sub">置顶</button></form>
+        <form method="post" action="/admin/task/{{ t.id }}/cancel" class="inline-form"
+              onsubmit="return confirm('确定取消该任务?已打印部分作废。')">
+          <button class="sub warn">取消</button></form>
+      </td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% endif %}
+</div>
+{% if history %}
+<div class="card">
+  <h2>最近完成 / 取消</h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th>任务</th><th>份数</th><th>提交人</th><th>状态</th></tr>
+    {% for t in history %}
+    <tr><td>{{ t.title }}</td><td>{{ t.copies }}</td><td>{{ t.source_user }}</td>
+        <td><span class="tag" style="background:{{ '#2e7d32' if t.status=='DONE' else '#9e9e9e' }}">{{ cn[t.status] }}</span></td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

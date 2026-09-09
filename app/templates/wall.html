@@ -1,0 +1,68 @@
+{% extends "base.html" %}{% block title %}状态墙{% endblock %}
+{% block brand %}打印集群·现场状态墙{% endblock %}
+{% block nav %}
+<a href="/wall" class="on">状态墙</a><a href="/tasks">任务</a>
+<a href="/fleet">机队</a><a href="/events">日志</a>
+<span class="right" id="sync">{{ sync }}</span>
+{% endblock %}
+{% block body %}
+<section class="wall-layout">
+<header class="page-heading"><h1>现场状态墙</h1><p>机器状态、任务进度与故障操作集中在一个视图。</p></header>
+<div class="notice" id="taskline">
+  {% if task %}正在打印:<b>《{{ task.title }}》</b>({{ cn[task.status] if cn else task.status }})
+  {% else %}当前无活动任务,待机中。{% endif %}
+  &nbsp;·&nbsp; 待打任务 {{ stats.queued_tasks }} 个 · 待打小组 {{ stats.queued_groups }} 个 ·
+  已完成小组 {{ stats.done_groups }} 个
+</div>
+<div class="grid" id="grid">
+  {% for p in printers %}
+  <div class="pcard" style="background:{{ colors[p.state] }}" data-pid="{{ p.id }}">
+    <span class="nm">{{ p.name }}</span>
+    <span class="st">{{ p.state }}</span>
+    {% if p.group %}<span class="st">{{ p.group.label }}</span>
+    <div class="bar"><i style="width:{{ p.progress }}%"></i></div>
+    <span class="st">纸盒 {{ p.tray_sheets }} 张</span>{% endif %}
+    <form method="post" action="/printer/{{ p.id }}/act">
+      {% if p.state in ['PRINTING','WAIT_PAPER','SUSPECT'] %}
+      <button name="act" value="fault">故障</button>{% endif %}
+      {% if p.state=='WAIT_PAPER' %}
+      <button name="act" value="refill">已加纸</button>
+      <button name="act" value="reassign">改派</button>{% endif %}
+      {% if p.state in ['SUSPECT','QUARANTINED'] %}
+      <button name="act" value="reset">复位</button>{% endif %}
+    </form>
+  </div>
+  {% endfor %}
+</div>
+<p class="muted">每 3 秒自动刷新。加纸后点「已加纸」;卡纸/白线等异常点「故障」,任务会自动转到别的机器。</p>
+<script>
+const COLORS = {{ colors|tojson }};
+const escapeHTML = value => String(value ?? '').replace(/[&<>'"]/g, ch => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'
+})[ch]);
+async function refresh() {
+  try {
+    const r = await (await fetch('/api/state')).json();
+    if (!r.ok) return;
+    document.getElementById('grid').innerHTML = r.printers.map(p => {
+      let inner = `<span class="nm">${escapeHTML(p.name)}</span><span class="st">${escapeHTML(p.state)}</span>`;
+      if (p.group) inner += `<span class="st">${escapeHTML(p.group.label)}</span>
+        <div class="bar"><i style="width:${p.progress}%"></i></div>
+        <span class="st">纸盒 ${p.tray_sheets} 张</span>`;
+      inner += `<form method="post" action="/printer/${p.id}/act">` +
+        (['PRINTING','WAIT_PAPER','SUSPECT'].includes(p.state) ? `<button name="act" value="fault">故障</button>` : '') +
+        (p.state==='WAIT_PAPER' ? `<button name="act" value="refill">已加纸</button><button name="act" value="reassign">改派</button>` : '') +
+        (['SUSPECT','QUARANTINED'].includes(p.state) ? `<button name="act" value="reset">复位</button>` : '') +
+        `</form>`;
+      return `<div class="pcard" style="background:${COLORS[p.state]||'#666'}">${inner}</div>`;
+    }).join('');
+    const t = r.task;
+    document.getElementById('taskline').innerHTML =
+      (t ? `正在打印：<b>《${escapeHTML(t.title)}》</b>（${escapeHTML(t.status)}）` : '当前无活动任务，待机中。') +
+      ` &nbsp;·&nbsp; 待打任务 ${r.stats.queued_tasks} 个 · 待打小组 ${r.stats.queued_groups} 个 · 已完成小组 ${r.stats.done_groups} 个`;
+  } catch (e) {}
+}
+setInterval(refresh, 3000);
+</script>
+</section>
+{% endblock %}

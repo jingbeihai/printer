@@ -1,0 +1,64 @@
+{% extends "base.html" %}{% block title %}机队管理{% endblock %}
+{% block brand %}打印集群·本地代理{% endblock %}
+{% block nav %}
+<a href="/wall">状态墙</a><a href="/tasks">任务</a>
+<a href="/fleet" class="on">机队</a><a href="/events">日志</a>
+{% endblock %}
+{% block body %}
+<header class="page-heading"><h1>机队管理</h1><p>配置设备、安排维护，并快速隔离异常打印机。</p></header>
+<div class="card accent">
+  <h2>添加打印机</h2>
+  <form method="post" action="/fleet/add" class="fleet-form">
+    <label>编号/名称*<br><input name="name" placeholder="如 03号机" required></label>
+    <label>IP(真机)<br><input name="ip" placeholder="192.168.1.x"></label>
+    <label>队列名(CUPS/Windows打印机名)<br><input name="queue_name" placeholder="EPSON_M1178_03"></label>
+    <button>添加</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>机队({{ printers|length }})
+    <form method="post" action="/fleet/maintenance" class="inline-form section-action">
+      <button class="sub">立即全机维护页</button></form></h2>
+  <div class="table-wrap"><table>
+    <tr><th>名称</th><th>状态</th><th>IP</th><th>队列</th><th>连续运行</th><th>累计张数</th><th>搓纸轮</th>
+        <th>启用</th>{% if sim %}<th>模拟故障注入</th>{% endif %}<th>操作</th></tr>
+    {% for p in printers %}
+    <tr>
+      <td>{{ p.name }}</td>
+      <td><span class="tag" style="background:{{ colors[p.state] }}">{{ p.state }}</span></td>
+      <td class="muted">{{ p.ip or '-' }}</td>
+      <td class="muted">{{ p.queue_name or '-' }}</td>
+      <td>{{ (p.continuous_print_seconds / 60)|round(1) }} / {{ p.max_continuous_minutes }} 分钟
+        {% if p.state == 'RESTING' %}<br><span class="muted">休息至 {{ clock(p.rest_until) }}</span>{% endif %}</td>
+      <td>{{ p.pages_total }}</td>
+      <td>{% if p.pages_total >= roller_warn %}<span class="tag" style="background:#c62828">该换了</span>
+          {% else %}<span class="muted">{{ roller_warn - p.pages_total }} 后</span>{% endif %}</td>
+      <td>{{ '是' if p.enabled else '否' }}</td>
+      {% if sim %}
+      <td>
+        {% if p.state == 'RESTING' %}
+        <form method="post" action="/fleet/{{ p.id }}/rest/finish" class="inline-form">
+          <input name="reason" placeholder="提前结束原因" required><button class="sub">结束休息</button></form>
+        {% endif %}
+        <form method="post" action="/fleet/{{ p.id }}/inject" class="inline-form">
+          <button class="sub" name="fault" value="jam">卡纸</button>
+          <button class="sub" name="fault" value="offline">断网</button>
+          <button class="sub" name="fault" value="paper_out">缺纸</button>
+          <button class="sub ok" name="fault" value="">清除</button>
+        </form>
+      </td>
+      {% endif %}
+      <td>
+        {% if p.enabled %}
+        <form method="post" action="/fleet/{{ p.id }}/del" class="inline-form"
+              onsubmit="return confirm('下架该机器?')">
+          <button class="sub warn">下架</button></form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  <p class="muted">下架 = 不再参与调度(记录保留)。搓纸轮提醒阈值 {{ roller_warn }} 张,可在配置中调整。</p>
+</div>
+{% endblock %}

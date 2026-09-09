@@ -1,0 +1,29 @@
+# Runtime data and secrets
+data/
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+
+# Python and package output
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.spec
+pyinstaller*.log
+
+# Front-end build output
+prototype/node_modules/
+prototype/.next/
+prototype/out/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

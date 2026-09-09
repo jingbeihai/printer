@@ -1,0 +1,17 @@
+# ===== 基础依赖(任何平台都需要) =====
+fastapi>=0.100
+uvicorn>=0.23
+jinja2>=3.1
+pypdf>=3.16
+reportlab>=4.0
+python-multipart>=0.0.6
+requests>=2.31
+pywebview>=5.2
+pyinstaller>=6.0
+psycopg[binary]>=3.2
+boto3>=1.35
+
+# ===== 可选依赖(真机部署时按需安装) =====
+# pysnmp>=4.4        ; 真机状态监控(SNMP 页计数/缺纸/卡纸),Windows/Linux 通用
+# pycups>=2.0        ; Linux CUPS 后端
+# pywin32>=306       ; Windows 后端(打印队列状态),仅 Windows

@@ -1,0 +1,64 @@
+{% extends "base.html" %}{% block title %}数据统计{% endblock %}
+{% block nav %}
+<a href="/queue">任务队列</a><a href="/submit">提交任务</a>
+<a href="/dashboard" class="on">数据统计</a>{% if user.role=='admin' %}<a href="/admin">后台管理</a>{% endif %}
+<span class="right">{{ user.username }} · <a href="/logout">退出</a></span>
+{% endblock %}
+{% block body %}
+<header class="page-heading"><h1>打印数据</h1><p>按任务完成时间统计实际打印页数与用纸量。</p></header>
+
+<div class="stat-cards">
+  <div class="card"><div class="muted">今日任务数</div><div class="num">{{ today_stats.c or 0 }}</div><div class="metric-note">{{ today }}</div></div>
+  <div class="card"><div class="muted">今日打印页数</div><div class="num">{{ today_stats.pg or 0 }}</div><div class="metric-note">原稿页数 × 份数</div></div>
+  <div class="card"><div class="muted">本月任务数</div><div class="num">{{ month_stats.c or 0 }}</div><div class="metric-note">{{ current_month }}</div></div>
+  <div class="card"><div class="muted">本月打印页数</div><div class="num">{{ month_stats.pg or 0 }}</div><div class="metric-note">原稿页数 × 份数</div></div>
+</div>
+
+<div class="card accent">
+  <div class="section-head"><h2>选择统计范围</h2><span class="muted">仅统计已完成的打印任务</span></div>
+  <div class="query-toolbar">
+    <form method="get" action="/dashboard" class="query-form {% if selected_period=='day' %}selected{% endif %}">
+      <input type="hidden" name="period" value="day">
+      <label>按日期查询<input type="date" name="date" value="{{ selected_value if selected_period=='day' else today }}" required></label>
+      <button>查看当天</button>
+    </form>
+    <form method="get" action="/dashboard" class="query-form {% if selected_period=='month' %}selected{% endif %}">
+      <input type="hidden" name="period" value="month">
+      <label>按月份查询<input type="month" name="month" value="{{ selected_value if selected_period=='month' else current_month }}" required></label>
+      <button>查看当月</button>
+    </form>
+  </div>
+</div>
+
+<div class="period-stats">
+  <div><span>任务数</span><strong>{{ selected_stats.c or 0 }}</strong></div>
+  <div><span>打印份数</span><strong>{{ selected_stats.cp or 0 }}</strong></div>
+  <div><span>打印总页数</span><strong>{{ selected_stats.pg or 0 }}</strong></div>
+  <div><span>估算用纸</span><strong>{{ selected_stats.s or 0 }}</strong></div>
+</div>
+
+<div class="card">
+  <div class="section-head">
+    <h2>{{ selected_label }}</h2>
+    <a class="btn sub" href="/dashboard.csv?period={{ selected_period }}&{% if selected_period=='month' %}month{% else %}date{% endif %}={{ selected_value }}">导出 CSV</a>
+  </div>
+  {% if manifest %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>任务</th><th>学校 / 年级</th><th>班级数</th><th>份数</th><th>原稿页数</th>
+      <th>打印总页数</th><th>估算用纸</th><th>提交人</th><th>完成时间</th></tr></thead>
+    <tbody>
+    {% for t in manifest %}
+    <tr><td>{{ t.title }}</td><td>{{ t.school }} {{ t.grade }}</td><td>{{ t.classes }}</td>
+      <td>{{ t.copies }}</td><td>{{ t.pages }}</td><td>{{ t.pages * t.copies }}</td><td>{{ t.sheets }}</td>
+      <td>{{ t.source_user }}</td>
+      <td class="nowrap">{{ ts.strftime('%m-%d %H:%M', ts.localtime(t.done_at)) if t.done_at else '-' }}</td></tr>
+    {% endfor %}
+    </tbody>
+    <tfoot><tr><th>合计</th><th></th><th></th><th>{{ selected_stats.cp or 0 }}</th><th></th>
+      <th>{{ selected_stats.pg or 0 }}</th><th>{{ selected_stats.s or 0 }}</th><th></th><th></th></tr></tfoot>
+  </table></div>
+  {% else %}
+  <div class="empty"><strong>这个时间范围没有打印记录</strong>请选择其他日期或月份查看。</div>
+  {% endif %}
+</div>
+{% endblock %}
