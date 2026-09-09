@@ -7,6 +7,7 @@
 import csv
 import io
 import json
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -27,8 +28,12 @@ SESSION_COOKIE = "pc_session"
 def ensure_defaults():
     if not db.get_conf("invite_code"):
         db.set_conf("invite_code", config.INVITE_CODE)
-    if not db.get_conf("agent_token"):
-        db.set_conf("agent_token", config.AGENT_TOKEN)        # 首次来自环境变量
+    # 显式环境变量始终覆盖旧值，便于管理员轮换打印站凭据；
+    # 未提供时首次自动生成，绝不再使用公开的开发默认值。
+    if config.AGENT_TOKEN:
+        db.set_conf("agent_token", config.AGENT_TOKEN)
+    elif not db.get_conf("agent_token"):
+        db.set_conf("agent_token", secrets.token_urlsafe(32))
 
 
 def current_user(req: Request):

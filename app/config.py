@@ -38,7 +38,7 @@ R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
 
 # ---------- 本地 agent ----------
 CLOUD_URL = os.environ.get("PRINT_CLOUD_URL", "https://printer.7988798.xyz")
-AGENT_TOKEN = os.environ.get("PRINT_AGENT_TOKEN", "dev-token")     # 与云端管理页一致
+AGENT_TOKEN = os.environ.get("PRINT_AGENT_TOKEN", "")     # 仅服务器/打印站本机配置
 AGENT_PORT = int(os.environ.get("PRINT_AGENT_PORT", "8001"))
 SYNC_INTERVAL = int(os.environ.get("PRINT_SYNC_INTERVAL", "30"))   # 与云端同步周期(秒)
 LOCAL_PASSWORD = os.environ.get("PRINT_LOCAL_PASSWORD", "")        # 本地网页口令,空=免登录
