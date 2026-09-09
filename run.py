@@ -100,7 +100,8 @@ def run_desktop():
 
 
 if __name__ == "__main__":
-    role = sys.argv[1] if len(sys.argv) > 1 else "demo"
+    # 打包后的 Windows EXE 双击即打开统一桌面客户端；源码直接运行仍默认演示。
+    role = sys.argv[1] if len(sys.argv) > 1 else ("desktop" if getattr(sys, "frozen", False) else "demo")
     {"server": run_server, "agent": run_agent, "demo": run_demo, "desktop": run_desktop,
      "invite": show_invite}.get(
         role, lambda: sys.exit(f"未知角色: {role}"))()
