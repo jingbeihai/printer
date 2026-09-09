@@ -37,7 +37,7 @@ R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
 
 # ---------- 本地 agent ----------
-CLOUD_URL = os.environ.get("PRINT_CLOUD_URL", "http://127.0.0.1:8000")
+CLOUD_URL = os.environ.get("PRINT_CLOUD_URL", "https://printer.7988798.xyz")
 AGENT_TOKEN = os.environ.get("PRINT_AGENT_TOKEN", "dev-token")     # 与云端管理页一致
 AGENT_PORT = int(os.environ.get("PRINT_AGENT_PORT", "8001"))
 SYNC_INTERVAL = int(os.environ.get("PRINT_SYNC_INTERVAL", "30"))   # 与云端同步周期(秒)
