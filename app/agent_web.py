@@ -11,13 +11,15 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from . import config, db, importer
 from .models import STATE_COLOR, TASK_STATUS_CN
 from .models import PrinterState as PS
-from .webcommon import make_session, read_session, render
+from .webcommon import jinja, make_session, read_session, render
 
 SESSION_COOKIE = "pc_local"
 
 
 def create_app(executor, syncer) -> FastAPI:
     app = FastAPI(title="打印集群·本地代理", docs_url=None, redoc_url=None)
+    # 打印站与云端页面共用同一顶栏；本地页可跳回云端的上传、学校与统计模块。
+    jinja.globals["cloud_url"] = (config.CLOUD_URL or "").rstrip("/")
 
     def authed(req: Request) -> bool:
         if not config.LOCAL_PASSWORD:
@@ -46,7 +48,7 @@ def create_app(executor, syncer) -> FastAPI:
 
     @app.get("/")
     def index():
-        return RedirectResponse("/wall", 303)
+        return RedirectResponse("/tasks", 303)
 
     # ---------------- 状态墙 ----------------
     @app.get("/wall", response_class=HTMLResponse)

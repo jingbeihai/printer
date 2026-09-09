@@ -1,11 +1,12 @@
 {% extends "base.html" %}{% block title %}任务{% endblock %}
 {% block brand %}打印集群·本地代理{% endblock %}
 {% block nav %}
-<a href="/wall">状态墙</a><a href="/tasks" class="on">任务</a>
-<a href="/fleet">机队</a><a href="/events">日志</a>
+<a href="/tasks" class="on">打印队列</a><a href="{{ cloud_url }}/submit">上传任务</a>
+<a href="{{ cloud_url }}/admin">学校管理</a><a href="{{ cloud_url }}/dashboard">统计管理</a>
+<a href="/fleet">打印机管理</a>
 {% endblock %}
 {% block body %}
-<header class="page-heading"><h1>现场任务</h1><p>确认当前批次、收纸闸口和后续打印顺序。</p></header>
+<header class="page-heading"><h1>打印队列</h1><p>确认当前批次、收纸闸口和后续打印顺序。</p></header>
 {% if active %}
 <div class="card accent">
   <h2>当前任务: 《{{ active.title }}》

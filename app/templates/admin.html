@@ -1,11 +1,11 @@
 {% extends "base.html" %}{% block title %}后台管理{% endblock %}
 {% block nav %}
-<a href="/queue">任务队列</a><a href="/submit">提交任务</a>
-<a href="/dashboard">数据统计</a><a href="/admin" class="on">后台管理</a>
+<a href="/queue">打印队列</a><a href="/submit">上传任务</a>
+<a href="/admin" class="on">学校管理</a><a href="/dashboard">统计管理</a>
 <span class="right">{{ user.username }} · <a href="/logout">退出</a></span>
 {% endblock %}
 {% block body %}
-<header class="page-heading"><h1>后台管理</h1><p>维护注册访问、学校配置和系统用户。</p></header>
+<header class="page-heading"><h1>学校管理</h1><p>维护学校、年级、班级数与默认份数；账号与邀请码作为管理员设置保留在本页。</p></header>
 
 <div class="card accent">
   <div class="section-head"><h2>注册设置</h2><span class="muted">新用户注册时使用</span></div>

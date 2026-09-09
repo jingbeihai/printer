@@ -1,8 +1,9 @@
 {% extends "base.html" %}{% block title %}机队管理{% endblock %}
 {% block brand %}打印集群·本地代理{% endblock %}
 {% block nav %}
-<a href="/wall">状态墙</a><a href="/tasks">任务</a>
-<a href="/fleet" class="on">机队</a><a href="/events">日志</a>
+<a href="/tasks">打印队列</a><a href="{{ cloud_url }}/submit">上传任务</a>
+<a href="{{ cloud_url }}/admin">学校管理</a><a href="{{ cloud_url }}/dashboard">统计管理</a>
+<a href="/fleet" class="on">打印机管理</a>
 {% endblock %}
 {% block body %}
 <header class="page-heading"><h1>机队管理</h1><p>配置设备、安排维护，并快速隔离异常打印机。</p></header>

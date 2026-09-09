@@ -1,25 +1,25 @@
 {% extends "base.html" %}{% block title %}任务队列{% endblock %}
 {% block nav %}
-<a href="/queue" class="on">任务队列</a><a href="/submit">提交任务</a>
-<a href="/dashboard">数据统计</a>{% if user.role=='admin' %}<a href="/admin">后台管理</a>{% endif %}
+<a href="/queue" class="on">打印队列</a><a href="/submit">上传任务</a>
+{% if user.role=='admin' %}<a href="/admin">学校管理</a>{% endif %}<a href="/dashboard">统计管理</a>
 <span class="right">{{ user.username }} · <a href="/logout">退出</a></span>
 {% endblock %}
 {% block body %}
-<header class="page-heading"><h1>打印任务队列</h1><p>按优先级与提交顺序执行，现场状态会自动同步。</p></header>
+<header class="page-heading"><h1>打印队列</h1><p>今日上传及未完成任务；打印站领取后显示执行设备与进度。</p></header>
 <div class="card accent">
   <div class="section-head"><h2>等待处理 · {{ tasks|length }}</h2><a class="btn" href="/submit">＋ 提交任务</a></div>
   {% if not tasks %}<div class="empty"><strong>队列已经清空</strong>当前没有等待打印的任务。</div>{% endif %}
   {% if tasks %}
   <div class="table-wrap">
   <table>
-    <tr><th>#</th><th>任务</th><th>学校/年级</th><th>班级数</th><th>份数</th><th>页数</th>
+    <tr><th>#</th><th>任务</th><th>学校/年级</th><th>班级 × 份数</th><th>页数</th>
         <th>估算张数</th><th>提交人</th><th>状态</th>{% if admin %}<th>操作</th>{% endif %}</tr>
     {% for t in tasks %}
     <tr>
       <td>{{ loop.index }}{% if t.priority>0 %} <span class="tag" style="background:#c62828">置顶</span>{% endif %}</td>
       <td>{{ t.title }}{% if t.note %}<div class="muted">{{ t.note }}</div>{% endif %}</td>
-      <td>{{ t.school }} {{ t.grade }}</td><td>{{ t.classes }}</td>
-      <td>{{ t.copies }}</td><td>{{ t.pages }}</td><td>{{ t.sheets }}</td>
+      <td>{{ t.school }} {{ t.grade }}</td><td>{{ t.classes }} 班 × {{ t.copies }} 份</td>
+      <td>{{ t.pages }}</td><td>{{ t.sheets }}</td>
       <td>{{ t.source_user }}</td>
       <td><span class="tag" style="background:{{ {'QUEUED':'#94a3b8','PRINTING':'#1565c0','AWAITING_PICKUP':'#f9a825'}[t.status] }}">{{ cn[t.status] }}</span></td>
       {% if admin %}

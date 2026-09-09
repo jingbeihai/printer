@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% block title %}数据统计{% endblock %}
 {% block nav %}
-<a href="/queue">任务队列</a><a href="/submit">提交任务</a>
-<a href="/dashboard" class="on">数据统计</a>{% if user.role=='admin' %}<a href="/admin">后台管理</a>{% endif %}
+<a href="/queue">打印队列</a><a href="/submit">上传任务</a>
+{% if user.role=='admin' %}<a href="/admin">学校管理</a>{% endif %}<a href="/dashboard" class="on">统计管理</a>
 <span class="right">{{ user.username }} · <a href="/logout">退出</a></span>
 {% endblock %}
 {% block body %}

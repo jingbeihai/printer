@@ -88,7 +88,8 @@ def _start_station(settings: dict) -> tuple[Executor, str]:
     threading.Thread(target=server.run, daemon=True).start()
     # 给本地服务一个短暂启动窗口；失败时 WebView 会显示明确错误。
     time.sleep(0.25)
-    return executor, f"http://127.0.0.1:{config.AGENT_PORT}/wall"
+    # 打印站默认打开与新原型一致的“打印队列”，状态墙仍作为辅助页面。
+    return executor, f"http://127.0.0.1:{config.AGENT_PORT}/tasks"
 
 
 def main() -> None:
