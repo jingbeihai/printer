@@ -21,6 +21,9 @@ pyinstaller*.log
 prototype/node_modules/
 prototype/.next/
 prototype/out/
+*.tar.gz
+打印集群.zip
+样例/
 
 # Editor and operating-system files
 .vscode/
