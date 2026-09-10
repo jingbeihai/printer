@@ -313,7 +313,7 @@ def create_app() -> FastAPI:
         db.execute("UPDATE tasks SET pdf_path=? WHERE id=?", (path, tid))
         db.log_event("TASK_SUBMITTED", f"《{title}》 {pages}页，{classes}班×{copies_per_class}份",
                      task_id=tid, table="task_events")
-        return api_snapshot(req)
+        return JSONResponse({"ok": True, "task_id": tid})
 
     @app.get("/submit", response_class=HTMLResponse)
     def submit_page(req: Request):
