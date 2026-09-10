@@ -15,7 +15,8 @@ const apiBase = typeof window !== "undefined" && window.location.hostname === "p
 
 async function request(path:string, init?:RequestInit):Promise<Snapshot>{
   const response=await fetch(apiBase+path,{credentials:"include",...init});
-  const body=await response.json() as Snapshot;
+  let body:Snapshot;
+  try{body=await response.json() as Snapshot}catch{throw new Error(`云端返回异常（HTTP ${response.status}），请重新登录后再试`)}
   if(!response.ok||!body.ok)throw new Error(body.error||"云端请求失败");
   return body;
 }
