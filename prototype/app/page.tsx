@@ -52,7 +52,7 @@ export default function Home(){
  const previewAllocations=printJob&&selectedDevices.length?selectedDevices.map((id,index)=>{const total=printJob.classes*printJob.copies,base=Math.floor(total/selectedDevices.length),count=base+(index<total%selectedDevices.length?1:0);return {device:devices.find(d=>d.id===id),copies:count,pages:count*printJob.pages}}):[];
  const groups=Array.from(new Set(report.rows.map(j=>j.school))).map(school=>({school,tasks:report.rows.filter(j=>j.school===school).length,pages:report.rows.filter(j=>j.school===school).reduce((n,j)=>n+totalPages(j),0)}));
  const snapshot=useRef({state,view});snapshot.current={state,view};
- useEffect(()=>{void loadSnapshot().then(applyCloud).catch(error=>setNotice(error instanceof Error?error.message:"无法连接云端"))},[]);
+ useEffect(()=>{void loadSnapshot().then(applyCloud).catch(error=>setNotice(error instanceof Error?error.message:"无法连接云端"));const timer=window.setInterval(()=>{void loadSnapshot().then(applyCloud).catch(()=>{})},5000);return()=>window.clearInterval(timer)},[]);
  useEffect(()=>{type Tool={name:string;description:string;inputSchema:object;annotations:{readOnlyHint:boolean};execute:(input:unknown)=>unknown};
  const context=(document as Document&{modelContext?:{registerTool:(tool:Tool,opts:{signal:AbortSignal})=>void|Promise<void>}}).modelContext;if(!context)return;const life=new AbortController();
  const register=(tool:Tool)=>{try{Promise.resolve(context.registerTool(tool,{signal:life.signal})).catch(()=>{})}catch{}};

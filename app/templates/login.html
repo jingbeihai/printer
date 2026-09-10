@@ -9,13 +9,21 @@
     </div>
     <div class="auth-body">
       {% if error %}<div class="err">{{ error }}</div>{% endif %}
-      <form method="post">
+      <form method="post" id="login-form">
         <label>用户名<input name="username" autocomplete="username" placeholder="请输入用户名" required autofocus></label>
         <label>密码<input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required></label>
+        <label class="remember"><input type="checkbox" id="remember-login" checked> 记住用户名和密码（仅保存在本机）</label>
         <button>登录任务中心</button>
       </form>
       <p class="muted auth-foot">还没有账号？<a href="/register">使用邀请码注册</a></p>
     </div>
   </div>
 </section>
+<script>
+  (() => {
+    const form=document.getElementById('login-form'), user=form?.elements.username, pass=form?.elements.password, remember=document.getElementById('remember-login');
+    try { const saved=JSON.parse(localStorage.getItem('canon-print-login')||'null'); if(saved){user.value=saved.username||'';pass.value=saved.password||'';} } catch (_) {}
+    form?.addEventListener('submit',()=>{ try { if(remember.checked)localStorage.setItem('canon-print-login',JSON.stringify({username:user.value,password:pass.value})); else localStorage.removeItem('canon-print-login'); } catch (_) {} });
+  })();
+</script>
 {% endblock %}
