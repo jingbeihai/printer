@@ -45,18 +45,13 @@ def _save_settings(value: dict) -> None:
 
 
 def _first_run_dialog(settings: dict) -> dict:
-    """首次启动只收集必要连接信息；后续可编辑 client-settings.json。"""
+    """首次启动只询问是否为打印站；云端地址已由产品默认值提供。"""
     if SETTINGS_PATH.exists():
         return settings
     import tkinter as tk
     from tkinter import messagebox, simpledialog
     root = tk.Tk()
     root.withdraw()
-    url = simpledialog.askstring("打印管理系统", "云端服务地址：", initialvalue=settings["cloud_url"], parent=root)
-    if not url:
-        root.destroy()
-        raise SystemExit("未配置云端服务地址")
-    settings["cloud_url"] = url.rstrip("/")
     settings["station_mode"] = messagebox.askyesno(
         "打印站设置", "这台电脑是否连接佳能 C5560 并作为打印站？", parent=root)
     if settings["station_mode"]:

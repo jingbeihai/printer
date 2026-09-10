@@ -26,7 +26,7 @@ SESSION_COOKIE = "pc_session"
 # ---------------- 初始化与公共 ----------------
 
 def ensure_defaults():
-    if not db.get_conf("invite_code"):
+    if config.INVITE_CODE:
         db.set_conf("invite_code", config.INVITE_CODE)
     # 显式环境变量始终覆盖旧值，便于管理员轮换打印站凭据；
     # 未提供时首次自动生成，绝不再使用公开的开发默认值。
@@ -34,6 +34,11 @@ def ensure_defaults():
         db.set_conf("agent_token", config.AGENT_TOKEN)
     elif not db.get_conf("agent_token"):
         db.set_conf("agent_token", secrets.token_urlsafe(32))
+    # 首次初始化自动创建管理员。已有用户时绝不覆盖已有账号或密码。
+    if db.one("SELECT COUNT(*) c FROM users")["c"] == 0:
+        db.execute("INSERT INTO users(username,pw_hash,role,created_at) VALUES(?,?,?,?)",
+                   (config.BOOTSTRAP_ADMIN_USERNAME,
+                    hash_password(config.BOOTSTRAP_ADMIN_PASSWORD), ROLE_ADMIN, time.time()))
 
 
 def current_user(req: Request):

@@ -26,7 +26,10 @@ BACKEND = os.environ.get("PRINT_BACKEND", "sim")
 # ---------- 云端 server ----------
 SERVER_PORT = int(os.environ.get("PRINT_PORT", "8000"))
 SECRET = os.environ.get("PRINT_SECRET", "change-me-print-cluster")
-INVITE_CODE = os.environ.get("PRINT_INVITE_CODE", "SXSZ")
+INVITE_CODE = os.environ.get("PRINT_INVITE_CODE", "101010")
+# 仅在数据库还没有任何用户时创建首个管理员；后续修改环境变量不会重置密码。
+BOOTSTRAP_ADMIN_USERNAME = os.environ.get("PRINT_BOOTSTRAP_ADMIN_USERNAME", "admin")
+BOOTSTRAP_ADMIN_PASSWORD = os.environ.get("PRINT_BOOTSTRAP_ADMIN_PASSWORD", "262626")
 FILE_RETENTION_DAYS = int(os.environ.get("PRINT_RETENTION_DAYS", "30"))  # 上传PDF保留天数
 
 # ---------- 云端文件存储：local（演示）/ r2（生产） ----------
