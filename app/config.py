@@ -32,12 +32,9 @@ BOOTSTRAP_ADMIN_USERNAME = os.environ.get("PRINT_BOOTSTRAP_ADMIN_USERNAME", "adm
 BOOTSTRAP_ADMIN_PASSWORD = os.environ.get("PRINT_BOOTSTRAP_ADMIN_PASSWORD", "262626")
 FILE_RETENTION_DAYS = int(os.environ.get("PRINT_RETENTION_DAYS", "30"))  # 上传PDF保留天数
 
-# ---------- 云端文件存储：local（演示）/ r2（生产） ----------
-STORAGE_BACKEND = os.environ.get("PRINT_STORAGE_BACKEND", "local").lower()
-R2_ENDPOINT = os.environ.get("R2_ENDPOINT", "")
-R2_BUCKET = os.environ.get("R2_BUCKET", "")
-R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
-R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+# ---------- 云端文件存储：服务器本地磁盘 ----------
+# 文件统一保存到 DATA_DIR/uploads，避免依赖外部对象存储。
+STORAGE_BACKEND = "local"
 
 # ---------- 本地 agent ----------
 CLOUD_URL = os.environ.get("PRINT_CLOUD_URL", "https://printer.7988798.xyz")

@@ -63,13 +63,6 @@ def save_upload_by_date(task_id: int, up: UploadFile, content: bytes) -> str:
 
 def cleanup_old_uploads():
     cutoff = time.time() - config.FILE_RETENTION_DAYS * 86400
-    if config.STORAGE_BACKEND == "r2":
-        for task in db.q("SELECT id,pdf_path FROM tasks WHERE pdf_path<>'' AND created_at<?", (cutoff,)):
-            storage.remove(task["pdf_path"])
-            db.execute("UPDATE tasks SET pdf_path='' WHERE id=?", (task["id"],))
-            db.log_event("RETENTION_PURGE", f"R2 原稿已按{config.FILE_RETENTION_DAYS}天策略删除",
-                         task_id=task["id"], table="task_events")
-        return
     for d in sorted(config.UPLOAD_DIR.glob("*")):
         if not d.is_dir():
             continue
@@ -275,7 +268,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/tasks")
     async def api_task_create(req: Request):
-        """原型上传入口：页数以云端解析 PDF 的结果为准，手填页数仅作前端提示。"""
+        """上传文件并直接采用客户端 PDF.js 已识别的原稿页数。"""
         user, error = api_user(req)
         if error:
             return error
@@ -296,9 +289,11 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": "只支持 PDF 文件"}, status_code=400)
         content = await upload.read()
         try:
-            pages = max(0, int(form.get("pages", 0) or 0))
+            pages = int(form.get("pages", 0) or 0)
         except (TypeError, ValueError):
             pages = 0
+        if pages < 1 or pages > 100000:
+            return JSONResponse({"ok": False, "error": "原稿页数无效"}, status_code=400)
         title, filename_copies = importer.parse_filename(upload.filename)
         if filename_copies:
             copies_per_class = filename_copies
@@ -306,7 +301,8 @@ def create_app() -> FastAPI:
         tid = db.execute(
             "INSERT INTO tasks(title,school,grade,classes,copies,copies_per_class,pages,sheets,note,"
             "source_user,status,pdf_path,pdf_name,created_at) VALUES(?,?,?,?,?,?,?,?,'',?,'QUEUED','',?,?)",
-            (title, school, grade, classes, total_copies, copies_per_class, 0, 0,
+            (title, school, grade, classes, total_copies, copies_per_class, pages,
+             sheets_per_copy(pages) * total_copies,
              user["username"], upload.filename, time.time()))
         path = save_upload_by_date(tid, upload, content)
         db.execute("UPDATE tasks SET pdf_path=? WHERE id=?", (path, tid))
