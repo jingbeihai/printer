@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS tasks(
   title TEXT NOT NULL,
   school TEXT DEFAULT '', grade TEXT DEFAULT '',
   classes INTEGER DEFAULT 0,
-  copies INTEGER NOT NULL,
+  copies INTEGER NOT NULL,               -- 实际总份数，供打印执行器使用
+  copies_per_class INTEGER,              -- 每班份数，供界面与统计展示
   pages INTEGER NOT NULL,
   sheets INTEGER NOT NULL,               -- 估算总张数(不含封面)
   note TEXT DEFAULT '',
@@ -160,6 +161,13 @@ def init(path, schema):
             ):
                 if name not in existing:
                     _conn.execute(f"ALTER TABLE printers ADD COLUMN {name} {definition}")
+        if "tasks" in schema:
+            if _postgres:
+                _conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS copies_per_class INTEGER")
+            else:
+                existing = {r["name"] for r in _conn.execute("PRAGMA table_info(tasks)")}
+                if "copies_per_class" not in existing:
+                    _conn.execute("ALTER TABLE tasks ADD COLUMN copies_per_class INTEGER")
         # SQLite 专有维护语句；PostgreSQL 不支持 PRAGMA。
         if not _postgres:
             _conn.execute("PRAGMA optimize")

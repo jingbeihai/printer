@@ -15,8 +15,10 @@ from pathlib import Path
 from fastapi import FastAPI, Form, Request, Response, UploadFile
 from fastapi.responses import (HTMLResponse, JSONResponse,
                                PlainTextResponse, RedirectResponse)
+from fastapi.staticfiles import StaticFiles
 
 from . import config, db, importer, storage
+from .compose import sheets_per_copy
 from .models import ROLE_ADMIN, TASK_STATUS_CN, TaskStatus
 from .webcommon import hash_password, make_session, read_session, render, verify_password
 
@@ -126,7 +128,7 @@ def create_app() -> FastAPI:
         role = ROLE_ADMIN if first else "teacher"
         uid = db.execute("INSERT INTO users(username,pw_hash,role,created_at) VALUES(?,?,?,?)",
                          (username, hash_password(password), role, time.time()))
-        resp = RedirectResponse("/queue", 303)
+        resp = RedirectResponse("/desk/", 303)
         resp.set_cookie(SESSION_COOKIE, make_session({"uid": uid}), httponly=True)
         return resp
 
@@ -139,7 +141,7 @@ def create_app() -> FastAPI:
         u = db.one("SELECT * FROM users WHERE username=?", (username.strip(),))
         if not u or not verify_password(password, u["pw_hash"]):
             return render("login.html", error="用户名或密码错误")
-        resp = RedirectResponse("/queue", 303)
+        resp = RedirectResponse("/desk/", 303)
         resp.set_cookie(SESSION_COOKIE, make_session({"uid": u["id"]}), httponly=True)
         return resp
 
@@ -151,12 +153,167 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     def index():
-        return RedirectResponse("/queue", 303)
+        return RedirectResponse("/desk/", 303)
 
     # ---------- 提交 ----------
     def school_presets():
         return [dict(row) for row in
                 db.q("SELECT * FROM school_presets ORDER BY school, grade")]
+
+    # React 桌面界面使用这一组同源接口。旧的 Jinja 页面仍可访问，便于已打开的
+    # 浏览器会话平滑过渡；新 EXE 不再以那些页面作为产品界面。
+    def api_user(req: Request):
+        user = require_user(req)
+        if not user:
+            return None, JSONResponse({"ok": False, "error": "登录已失效"}, status_code=401)
+        return user, None
+
+    def api_task(row):
+        task = dict(row)
+        task["copies_per_class"] = task.get("copies_per_class") or (
+            max(1, task["copies"] // task["classes"]) if task["classes"] else task["copies"])
+        task["status_label"] = TASK_STATUS_CN.get(task["status"], task["status"])
+        task["total_pages"] = task["pages"] * task["copies"]
+        return task
+
+    def api_snapshot(req: Request):
+        user, error = api_user(req)
+        if error:
+            return error
+        tasks = [api_task(row) for row in db.q("SELECT * FROM tasks ORDER BY priority DESC, id DESC")]
+        now = time.time()
+        day_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+        month_start = time.mktime(time.strptime(time.strftime("%Y-%m"), "%Y-%m"))
+        done_today = [task for task in tasks if task["status"] == TaskStatus.DONE.value and
+                      task["done_at"] and task["done_at"] >= day_start]
+        done_month = [task for task in tasks if task["status"] == TaskStatus.DONE.value and
+                      task["done_at"] and task["done_at"] >= month_start]
+        return {
+            "ok": True,
+            "user": {"username": user["username"], "role": user["role"]},
+            "now": now,
+            "tasks": tasks,
+            "presets": school_presets(),
+            # 打印机的实时信息由打印站后续上报；空列表在未连接打印站时是正常状态。
+            "printers": [],
+            "stats": {
+                "today": {"tasks": len(done_today), "pages": sum(task["total_pages"] for task in done_today)},
+                "month": {"tasks": len(done_month), "pages": sum(task["total_pages"] for task in done_month)},
+            },
+        }
+
+    @app.get("/api/v1/bootstrap")
+    def api_bootstrap(req: Request):
+        return api_snapshot(req)
+
+    @app.post("/api/v1/schools")
+    async def api_school_create(req: Request):
+        user, error = api_user(req)
+        if error:
+            return error
+        if user["role"] != ROLE_ADMIN:
+            return JSONResponse({"ok": False, "error": "仅管理员可维护学校"}, status_code=403)
+        body = await req.json()
+        school, grade = str(body.get("school", "")).strip(), str(body.get("grade", "")).strip()
+        try:
+            classes, copies = int(body.get("classes")), int(body.get("copies"))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "班级数和份数必须为整数"}, status_code=400)
+        if not school or not grade or classes < 1 or copies < 1:
+            return JSONResponse({"ok": False, "error": "请填写学校、年级、班级数和每班份数"}, status_code=400)
+        db.execute("INSERT INTO school_presets(school,grade,classes,copies) VALUES(?,?,?,?) "
+                   "ON CONFLICT(school,grade) DO UPDATE SET classes=excluded.classes,copies=excluded.copies",
+                   (school, grade, classes, copies))
+        return api_snapshot(req)
+
+    @app.put("/api/v1/schools/{sid}")
+    async def api_school_update(req: Request, sid: int):
+        user, error = api_user(req)
+        if error:
+            return error
+        if user["role"] != ROLE_ADMIN:
+            return JSONResponse({"ok": False, "error": "仅管理员可维护学校"}, status_code=403)
+        body = await req.json()
+        school, grade = str(body.get("school", "")).strip(), str(body.get("grade", "")).strip()
+        try:
+            classes, copies = int(body.get("classes")), int(body.get("copies"))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "班级数和份数必须为整数"}, status_code=400)
+        if not db.one("SELECT id FROM school_presets WHERE id=?", (sid,)):
+            return JSONResponse({"ok": False, "error": "学校预设不存在"}, status_code=404)
+        if not school or not grade or classes < 1 or copies < 1:
+            return JSONResponse({"ok": False, "error": "请填写学校、年级、班级数和每班份数"}, status_code=400)
+        db.execute("UPDATE school_presets SET school=?,grade=?,classes=?,copies=? WHERE id=?",
+                   (school, grade, classes, copies, sid))
+        return api_snapshot(req)
+
+    @app.delete("/api/v1/schools/{sid}")
+    def api_school_delete(req: Request, sid: int):
+        user, error = api_user(req)
+        if error:
+            return error
+        if user["role"] != ROLE_ADMIN:
+            return JSONResponse({"ok": False, "error": "仅管理员可维护学校"}, status_code=403)
+        db.execute("DELETE FROM school_presets WHERE id=?", (sid,))
+        return api_snapshot(req)
+
+    @app.post("/api/v1/tasks/{tid}/cancel")
+    def api_task_cancel(req: Request, tid: int):
+        user, error = api_user(req)
+        if error:
+            return error
+        task = db.one("SELECT * FROM tasks WHERE id=?", (tid,))
+        if not task:
+            return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+        if task["source_user"] != user["username"] and user["role"] != ROLE_ADMIN:
+            return JSONResponse({"ok": False, "error": "只能取消自己提交的任务"}, status_code=403)
+        if task["status"] in (TaskStatus.DONE.value, TaskStatus.CANCELED.value):
+            return JSONResponse({"ok": False, "error": "该任务不能取消"}, status_code=400)
+        db.execute("UPDATE tasks SET status='CANCELED', done_at=? WHERE id=?", (time.time(), tid))
+        db.log_event("TASK_CANCELED", f"{user['username']} 取消任务", task_id=tid, table="task_events")
+        return api_snapshot(req)
+
+    @app.post("/api/v1/tasks")
+    async def api_task_create(req: Request):
+        """原型上传入口：页数以云端解析 PDF 的结果为准，手填页数仅作前端提示。"""
+        user, error = api_user(req)
+        if error:
+            return error
+        form = await req.form()
+        school, grade = str(form.get("school", "")).strip(), str(form.get("grade", "")).strip()
+        try:
+            classes, copies_per_class = int(form.get("classes", 0)), int(form.get("copies", 0))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "班级数和每班份数必须为整数"}, status_code=400)
+        if not school or not grade or classes < 1 or copies_per_class < 1:
+            return JSONResponse({"ok": False, "error": "请填写学校、年级、班级数和每班份数"}, status_code=400)
+        if not any(p["school"] == school and p["grade"] == grade for p in school_presets()):
+            return JSONResponse({"ok": False, "error": "请先在学校管理中创建对应的学校和年级"}, status_code=400)
+        upload = form.get("file")
+        if not upload or not getattr(upload, "filename", ""):
+            return JSONResponse({"ok": False, "error": "请选择 PDF 文件"}, status_code=400)
+        if not upload.filename.lower().endswith(".pdf"):
+            return JSONResponse({"ok": False, "error": "只支持 PDF 文件"}, status_code=400)
+        content = await upload.read()
+        try:
+            pages = storage.page_count(content)
+        except Exception:
+            return JSONResponse({"ok": False, "error": "无法读取 PDF 页数，请确认文件未损坏"}, status_code=400)
+        title, filename_copies = importer.parse_filename(upload.filename)
+        if filename_copies:
+            copies_per_class = filename_copies
+        total_copies = classes * copies_per_class
+        tid = db.execute(
+            "INSERT INTO tasks(title,school,grade,classes,copies,copies_per_class,pages,sheets,note,"
+            "source_user,status,pdf_path,pdf_name,created_at) VALUES(?,?,?,?,?,?,?,?,'',?,'QUEUED','',?,?)",
+            (title, school, grade, classes, total_copies, copies_per_class, pages,
+             sheets_per_copy(pages) * total_copies,
+             user["username"], upload.filename, time.time()))
+        path = save_upload_by_date(tid, upload, content)
+        db.execute("UPDATE tasks SET pdf_path=? WHERE id=?", (path, tid))
+        db.log_event("TASK_SUBMITTED", f"《{title}》 {pages}页，{classes}班×{copies_per_class}份",
+                     task_id=tid, table="task_events")
+        return api_snapshot(req)
 
     @app.get("/submit", response_class=HTMLResponse)
     def submit_page(req: Request):
@@ -440,4 +597,8 @@ def create_app() -> FastAPI:
         return Response(content=content, media_type="application/pdf",
                         headers={"Content-Disposition": f'attachment; filename="{t["pdf_name"]}"'})
 
+    # 当前可交互原型的静态构建产物。它必须在所有 API 路由之后挂载，避免吞掉 /api。
+    desk_dir = Path(__file__).parent / "static" / "desk"
+    if desk_dir.is_dir():
+        app.mount("/desk", StaticFiles(directory=str(desk_dir), html=True), name="desk")
     return app
