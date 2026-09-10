@@ -574,7 +574,8 @@ def create_app() -> FastAPI:
                 if st != t["status"]:
                     db.log_event("AGENT_REPORT", f"状态 → {st}", task_id=int(cid),
                                  table="task_events")
-        queued = db.q("SELECT * FROM tasks WHERE status='QUEUED'"
+        # 后台页数核对完成前不派发，避免打印站拿到 pages=0 的占位任务。
+        queued = db.q("SELECT * FROM tasks WHERE status='QUEUED' AND pages>0"
                       " ORDER BY priority DESC, id")
         canceled = [r["id"] for r in db.q("SELECT id FROM tasks WHERE status='CANCELED'")]
         priorities = {str(r["id"]): r["priority"] for r in
