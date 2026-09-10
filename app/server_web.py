@@ -173,7 +173,8 @@ def create_app() -> FastAPI:
         user, error = api_user(req)
         if error:
             return error
-        tasks = [api_task(row) for row in db.q("SELECT * FROM tasks ORDER BY priority DESC, id DESC")]
+        tasks = [api_task(row) for row in db.q(
+            "SELECT * FROM tasks WHERE status<>'UPLOADING' ORDER BY priority DESC, id DESC")]
         now = time.time()
         day_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
         month_start = time.mktime(time.strptime(time.strftime("%Y-%m"), "%Y-%m"))
@@ -265,6 +266,97 @@ def create_app() -> FastAPI:
         db.execute("UPDATE tasks SET status='CANCELED', done_at=? WHERE id=?", (time.time(), tid))
         db.log_event("TASK_CANCELED", f"{user['username']} 取消任务", task_id=tid, table="task_events")
         return api_snapshot(req)
+
+    @app.post("/api/v1/uploads/presign")
+    async def api_upload_presign(req: Request):
+        """创建上传占位任务，并签发只允许写入该对象的短期 COS URL。"""
+        user, error = api_user(req)
+        if error:
+            return error
+        if config.STORAGE_BACKEND != "cos":
+            return JSONResponse({"ok": False, "error": "云端尚未启用腾讯云 COS 直传"},
+                                status_code=503)
+        body = await req.json()
+        school = str(body.get("school", "")).strip()
+        grade = str(body.get("grade", "")).strip()
+        filename = Path(str(body.get("filename", ""))).name
+        try:
+            classes = int(body.get("classes", 0))
+            copies_per_class = int(body.get("copies", 0))
+            pages = int(body.get("pages", 0))
+            file_size = int(body.get("size", 0))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "任务参数无效"}, status_code=400)
+        if not school or not grade or classes < 1 or copies_per_class < 1:
+            return JSONResponse({"ok": False, "error": "请填写学校、年级、班级数和每班份数"},
+                                status_code=400)
+        if not any(p["school"] == school and p["grade"] == grade for p in school_presets()):
+            return JSONResponse({"ok": False, "error": "请先在学校管理中创建对应的学校和年级"},
+                                status_code=400)
+        if not filename.lower().endswith(".pdf"):
+            return JSONResponse({"ok": False, "error": "只支持 PDF 文件"}, status_code=400)
+        if pages < 1 or pages > 100000 or file_size < 1 or file_size > 5 * 1024 ** 3:
+            return JSONResponse({"ok": False, "error": "文件大小或原稿页数无效"}, status_code=400)
+        title, filename_copies = importer.parse_filename(filename)
+        if filename_copies:
+            copies_per_class = filename_copies
+        total_copies = classes * copies_per_class
+        tid = db.execute(
+            "INSERT INTO tasks(title,school,grade,classes,copies,copies_per_class,pages,sheets,note,"
+            "source_user,status,pdf_path,pdf_name,created_at) VALUES(?,?,?,?,?,?,?,?,'',?,'UPLOADING','',?,?)",
+            (title, school, grade, classes, total_copies, copies_per_class, pages,
+             sheets_per_copy(pages) * total_copies, user["username"], filename, time.time()))
+        try:
+            location, upload_url = storage.prepare_upload(tid, filename)
+            db.execute("UPDATE tasks SET pdf_path=? WHERE id=?", (location, tid))
+        except Exception as exc:  # 配置或签名错误应立即反馈，且不留下可见任务
+            db.execute("UPDATE tasks SET status='CANCELED', done_at=? WHERE id=?", (time.time(), tid))
+            return JSONResponse({"ok": False, "error": f"COS 上传地址生成失败：{exc}"},
+                                status_code=503)
+        return {"ok": True, "task_id": tid, "upload_url": upload_url,
+                "expires_in": config.COS_PRESIGN_SECONDS}
+
+    @app.post("/api/v1/uploads/{tid}/complete")
+    def api_upload_complete(req: Request, tid: int):
+        """浏览器直传完成后核实对象存在，再把任务放入打印队列。"""
+        user, error = api_user(req)
+        if error:
+            return error
+        task = db.one("SELECT * FROM tasks WHERE id=?", (tid,))
+        if not task or task["source_user"] != user["username"]:
+            return JSONResponse({"ok": False, "error": "上传任务不存在"}, status_code=404)
+        if task["status"] == TaskStatus.QUEUED.value:
+            return {"ok": True, "task_id": tid}
+        if task["status"] != "UPLOADING" or not task["pdf_path"]:
+            return JSONResponse({"ok": False, "error": "上传任务状态无效"}, status_code=409)
+        if not storage.exists(task["pdf_path"]):
+            return JSONResponse({"ok": False, "error": "COS 尚未收到完整文件，请重试上传"},
+                                status_code=409)
+        db.execute("UPDATE tasks SET status='QUEUED' WHERE id=?", (tid,))
+        db.log_event("TASK_SUBMITTED",
+                     f"《{task['title']}》已直传 COS，原稿{task['pages']}页，"
+                     f"{task['classes']}班×{task['copies_per_class']}份",
+                     task_id=tid, table="task_events")
+        return {"ok": True, "task_id": tid}
+
+    @app.delete("/api/v1/uploads/{tid}")
+    def api_upload_abort(req: Request, tid: int):
+        """直传失败时清理占位任务以及可能存在的半成品对象。"""
+        user, error = api_user(req)
+        if error:
+            return error
+        task = db.one("SELECT * FROM tasks WHERE id=?", (tid,))
+        if not task or task["source_user"] != user["username"]:
+            return JSONResponse({"ok": False, "error": "上传任务不存在"}, status_code=404)
+        if task["status"] != "UPLOADING":
+            return JSONResponse({"ok": False, "error": "上传任务状态无效"}, status_code=409)
+        if task["pdf_path"]:
+            try:
+                storage.remove(task["pdf_path"])
+            except Exception:  # 未形成对象时删除失败不影响清理占位任务
+                pass
+        db.execute("DELETE FROM tasks WHERE id=?", (tid,))
+        return {"ok": True, "task_id": tid}
 
     @app.post("/api/v1/tasks")
     async def api_task_create(req: Request):
@@ -586,6 +678,10 @@ def create_app() -> FastAPI:
         t = db.one("SELECT * FROM tasks WHERE id=?", (tid,))
         if not t or not t["pdf_path"]:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        direct_url = storage.download_url(t["pdf_path"])
+        if direct_url:
+            # requests 默认跟随重定向；打印站由 COS 直下，不让 PDF 再穿过 Tunnel。
+            return RedirectResponse(direct_url, status_code=307)
         try:
             content = storage.read(t["pdf_path"])
         except (OSError, RuntimeError):

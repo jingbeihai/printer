@@ -43,14 +43,41 @@ export const saveSchool=(id:number|null,input:Omit<Preset,"id">)=>request(
   });
 export const deleteSchool=(id:number)=>request(`/api/v1/schools/${id}`,{method:"DELETE"});
 export const cancelTask=(id:number)=>request(`/api/v1/tasks/${id}/cancel`,{method:"POST"});
-export const uploadTask=async (input:{file:File;school:string;grade:string;classes:number;copies:number;pages:number})=>{
-  const form=new FormData();
-  form.set("file",input.file);form.set("school",input.school);form.set("grade",input.grade);
-  form.set("classes",String(input.classes));form.set("copies",String(input.copies));
-  form.set("pages",String(input.pages||0));
-  const response=await fetch(apiBase+"/api/v1/tasks",{method:"POST",body:form,credentials:"include"});
-  let body:{ok:boolean;task_id?:number;error?:string};
-  try{body=await response.json()}catch{throw new Error(`云端返回异常（HTTP ${response.status}），请重新登录后再试`)}
+type UploadReply={ok:boolean;task_id:number;upload_url?:string;error?:string};
+async function uploadRequest(path:string,init:RequestInit):Promise<UploadReply>{
+  const response=await fetch(apiBase+path,{credentials:"include",...init});
+  let body:UploadReply;
+  try{body=await response.json()}catch{throw new Error(`云端返回异常（HTTP ${response.status}）`)}
   if(!response.ok||!body.ok)throw new Error(body.error||"上传失败");
   return body;
+}
+function putToCos(url:string,file:File,onProgress?:(percent:number)=>void){
+  return new Promise<void>((resolve,reject)=>{
+    const xhr=new XMLHttpRequest();xhr.open("PUT",url,true);xhr.timeout=30*60*1000;
+    xhr.setRequestHeader("Content-Type","application/pdf");
+    xhr.upload.onprogress=event=>{if(event.lengthComputable)onProgress?.(Math.round(event.loaded/event.total*100))};
+    xhr.onload=()=>xhr.status>=200&&xhr.status<300?resolve():reject(new Error(`COS 上传失败（HTTP ${xhr.status}）`));
+    xhr.onerror=()=>reject(new Error("无法直连腾讯云 COS，请检查存储桶跨域 CORS 设置"));
+    xhr.ontimeout=()=>reject(new Error("COS 上传超时，请检查网络后重试"));
+    xhr.send(file);
+  });
+}
+export const uploadTask=async (
+  input:{file:File;school:string;grade:string;classes:number;copies:number;pages:number},
+  onProgress?:(percent:number)=>void,
+)=>{
+  const prepared=await uploadRequest("/api/v1/uploads/presign",{
+    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+      filename:input.file.name,size:input.file.size,school:input.school,grade:input.grade,
+      classes:input.classes,copies:input.copies,pages:input.pages,
+    }),
+  });
+  if(!prepared.upload_url)throw new Error("云端未返回 COS 上传地址");
+  try{
+    await putToCos(prepared.upload_url,input.file,onProgress);
+    return await uploadRequest(`/api/v1/uploads/${prepared.task_id}/complete`,{method:"POST"});
+  }catch(error){
+    void fetch(apiBase+`/api/v1/uploads/${prepared.task_id}`,{method:"DELETE",credentials:"include"}).catch(()=>{});
+    throw error;
+  }
 };

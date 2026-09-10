@@ -32,9 +32,14 @@ BOOTSTRAP_ADMIN_USERNAME = os.environ.get("PRINT_BOOTSTRAP_ADMIN_USERNAME", "adm
 BOOTSTRAP_ADMIN_PASSWORD = os.environ.get("PRINT_BOOTSTRAP_ADMIN_PASSWORD", "262626")
 FILE_RETENTION_DAYS = int(os.environ.get("PRINT_RETENTION_DAYS", "30"))  # 上传PDF保留天数
 
-# ---------- 云端文件存储：服务器本地磁盘 ----------
-# 文件统一保存到 DATA_DIR/uploads，避免依赖外部对象存储。
-STORAGE_BACKEND = "local"
+# ---------- 云端文件存储：服务器本地磁盘 / 腾讯云 COS ----------
+# COS 密钥只配置在云服务器环境变量中，绝不能放进 EXE 或 GitHub。
+STORAGE_BACKEND = os.environ.get("PRINT_STORAGE_BACKEND", "local").strip().lower()
+COS_REGION = os.environ.get("COS_REGION", "ap-shanghai").strip()
+COS_BUCKET = os.environ.get("COS_BUCKET", "").strip()
+COS_SECRET_ID = os.environ.get("COS_SECRET_ID", "").strip()
+COS_SECRET_KEY = os.environ.get("COS_SECRET_KEY", "").strip()
+COS_PRESIGN_SECONDS = int(os.environ.get("COS_PRESIGN_SECONDS", "600"))
 
 # ---------- 本地 agent ----------
 CLOUD_URL = os.environ.get("PRINT_CLOUD_URL", "https://printer.7988798.xyz")
