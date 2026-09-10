@@ -43,10 +43,11 @@ export const saveSchool=(id:number|null,input:Omit<Preset,"id">)=>request(
   });
 export const deleteSchool=(id:number)=>request(`/api/v1/schools/${id}`,{method:"DELETE"});
 export const cancelTask=(id:number)=>request(`/api/v1/tasks/${id}/cancel`,{method:"POST"});
-export const uploadTask=async (input:{file:File;school:string;grade:string;classes:number;copies:number})=>{
+export const uploadTask=async (input:{file:File;school:string;grade:string;classes:number;copies:number;pages:number})=>{
   const form=new FormData();
   form.set("file",input.file);form.set("school",input.school);form.set("grade",input.grade);
   form.set("classes",String(input.classes));form.set("copies",String(input.copies));
+  form.set("pages",String(input.pages||0));
   const response=await fetch(apiBase+"/api/v1/tasks",{method:"POST",body:form,credentials:"include"});
   let body:{ok:boolean;task_id?:number;error?:string};
   try{body=await response.json()}catch{throw new Error(`云端返回异常（HTTP ${response.status}），请重新登录后再试`)}

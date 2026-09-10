@@ -295,6 +295,10 @@ def create_app() -> FastAPI:
         if not upload.filename.lower().endswith(".pdf"):
             return JSONResponse({"ok": False, "error": "只支持 PDF 文件"}, status_code=400)
         content = await upload.read()
+        try:
+            pages = max(0, int(form.get("pages", 0) or 0))
+        except (TypeError, ValueError):
+            pages = 0
         title, filename_copies = importer.parse_filename(upload.filename)
         if filename_copies:
             copies_per_class = filename_copies
@@ -306,17 +310,8 @@ def create_app() -> FastAPI:
              user["username"], upload.filename, time.time()))
         path = save_upload_by_date(tid, upload, content)
         db.execute("UPDATE tasks SET pdf_path=? WHERE id=?", (path, tid))
-        db.log_event("TASK_SUBMITTED", f"《{title}》已上传，页数后台核对中，{classes}班×{copies_per_class}份",
+        db.log_event("TASK_SUBMITTED", f"《{title}》已上传，原稿{pages}页，{classes}班×{copies_per_class}份",
                      task_id=tid, table="task_events")
-        def verify_pages():
-            try:
-                pages = storage.page_count(content)
-                db.execute("UPDATE tasks SET pages=?,sheets=? WHERE id=?",
-                           (pages, sheets_per_copy(pages) * total_copies, tid))
-                db.log_event("TASK_PAGES_VERIFIED", f"后台核对完成：{pages}页", task_id=tid, table="task_events")
-            except Exception as exc:  # noqa: BLE001
-                db.log_event("TASK_PAGES_VERIFY_FAILED", f"后台页数核对失败：{exc}", task_id=tid, table="task_events")
-        threading.Thread(target=verify_pages, daemon=True).start()
         return JSONResponse({"ok": True, "task_id": tid})
 
     @app.get("/submit", response_class=HTMLResponse)
