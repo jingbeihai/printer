@@ -160,7 +160,9 @@ def init(path, schema):
             ):
                 if name not in existing:
                     _conn.execute(f"ALTER TABLE printers ADD COLUMN {name} {definition}")
-        _conn.execute("PRAGMA optimize")
+        # SQLite 专有维护语句；PostgreSQL 不支持 PRAGMA。
+        if not _postgres:
+            _conn.execute("PRAGMA optimize")
         _conn.commit()
 
 
