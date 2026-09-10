@@ -596,5 +596,10 @@ def create_app() -> FastAPI:
     # 当前可交互原型的静态构建产物。它必须在所有 API 路由之后挂载，避免吞掉 /api。
     desk_dir = Path(__file__).parent / "static" / "desk"
     if desk_dir.is_dir():
+        # vinext 静态导出使用站点根路径 /_next/... 引用 CSS 与 JS。
+        # 页面本身位于 /desk/，因此需要单独暴露构建资源目录。
+        next_dir = desk_dir / "_next"
+        if next_dir.is_dir():
+            app.mount("/_next", StaticFiles(directory=str(next_dir)), name="desk-next")
         app.mount("/desk", StaticFiles(directory=str(desk_dir), html=True), name="desk")
     return app
