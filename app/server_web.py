@@ -85,8 +85,8 @@ def save_upload_by_date(task_id: int, up: UploadFile, content: bytes) -> str:
 def cleanup_old_uploads():
     cutoff = time.time() - config.FILE_RETENTION_DAYS * 86400
     # 按数据库位置清理 COS 文件，也覆盖切回 local 后遗留的对象。
-    for task in db.q("SELECT id,pdf_path FROM tasks WHERE pdf_path LIKE 'cos://%' AND created_at<?",
-                     (cutoff,)):
+    for task in db.q("SELECT id,pdf_path FROM tasks WHERE pdf_path LIKE ? AND created_at<?",
+                     ("cos://%", cutoff)):
         try:
             storage.remove(task["pdf_path"])
         except Exception as exc:

@@ -110,6 +110,21 @@ class UploadRegressionTests(unittest.TestCase):
         mocked.assert_called_once_with('cos://failed')
         self.assertEqual(db.one('SELECT COUNT(*) AS n FROM tasks')['n'], 3)
 
+    def test_retention_queries_parse_with_postgres_driver(self):
+        from psycopg._queries import PostgresQuery
+        from psycopg.adapt import Transformer
+
+        sqlite_query = db.q
+        def postgres_checked_query(sql, args=()):
+            # Exercise psycopg's real parameter parser, which rejected the old
+            # literal LIKE 'cos://%' before any network request was made.
+            query = PostgresQuery(Transformer())
+            query.convert(db._pg_sql(sql), args)
+            return sqlite_query(sql, args)
+
+        with patch.object(db, 'q', side_effect=postgres_checked_query):
+            server_web.cleanup_old_uploads()
+
 
 if __name__ == '__main__':
     unittest.main()
