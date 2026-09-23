@@ -39,6 +39,10 @@ Copy-Item -LiteralPath $frontend -Destination $assets -Recurse -Force
 
 python -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw '客户端依赖安装失败。' }
+if (!(Test-Path -LiteralPath (Join-Path $project 'tools\SumatraPDF.exe'))) {
+    python tools/fetch_sumatra.py
+    if ($LASTEXITCODE -ne 0) { throw '打印组件下载失败。' }
+}
 python -m PyInstaller --noconfirm --clean --windowed --name '绍兴数知-印务台' --collect-all webview --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module PySide2 --exclude-module PySide6 --add-data 'app/templates;app/templates' --add-data 'app/static;app/static' --add-data 'tools/SumatraPDF.exe;tools' --add-data 'tools/SumatraPDF-COPYING.txt;tools' run.py
 if ($LASTEXITCODE -ne 0) { throw '客户端打包失败。' }
 Write-Host "已生成: $project\dist\绍兴数知-印务台\绍兴数知-印务台.exe"

@@ -3,6 +3,8 @@ data/
 .env
 .env.*
 !.env.example
+print-cluster.env
+tools/SumatraPDF.exe
 *.db
 *.db-shm
 *.db-wal
