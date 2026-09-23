@@ -84,7 +84,7 @@ class CompanyAccountTests(unittest.TestCase):
 
     def test_public_old_invite_is_rotated_on_upgrade(self):
         db.set_conf('invite_code', '101010')
-        with patch.object(config, 'INVITE_CODE', ''):
+        with patch.object(config, 'INVITE_CODE', '101010'):
             server_web.ensure_defaults()
         self.assertNotEqual(db.get_conf('invite_code'), '101010')
 

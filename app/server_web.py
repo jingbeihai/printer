@@ -35,9 +35,12 @@ def ensure_defaults():
             secret = secrets.token_urlsafe(48)
             db.set_conf("session_secret", secret)
         config.SECRET = secret
-    if not db.get_conf("invite_code") or (
-            db.get_conf("invite_code") == "101010" and not config.INVITE_CODE):
-        db.set_conf("invite_code", config.INVITE_CODE or secrets.token_urlsafe(12))
+    saved_invite = db.get_conf("invite_code")
+    if not saved_invite:
+        db.set_conf("invite_code", config.INVITE_CODE if config.INVITE_CODE and
+                    config.INVITE_CODE != "101010" else secrets.token_urlsafe(12))
+    elif saved_invite == "101010":
+        db.set_conf("invite_code", secrets.token_urlsafe(12))
     # 显式环境变量始终覆盖旧值，便于管理员轮换打印站凭据；
     # 未提供时首次自动生成，绝不再使用公开的开发默认值。
     if config.AGENT_TOKEN:
