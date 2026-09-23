@@ -39,6 +39,8 @@ TASK_STATUS_CN = {
 }
 
 ROLE_ADMIN = "admin"
+ROLE_SUPERADMIN = "superadmin"
+ROLE_USER = "user"
 ROLE_TEACHER = "teacher"
 
 STATE_COLOR = {

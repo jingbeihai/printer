@@ -4,19 +4,24 @@ type CloudTask = {
   id:number; title:string; school:string; grade:string; classes:number; copies:number;
   copies_per_class:number; pages:number; source_user:string; status:string;
   created_at:number; done_at:number|null;
+  claimed?:boolean; print_requested_at?:number;
 };
-type Snapshot = {
+export type Snapshot = {
   ok:boolean; error?:string; now:number; user:{username:string;role:string};
+  client_kind?:"desktop"|"web";
   tasks:CloudTask[]; presets:Preset[]; printers:Device[];
+  station_available?:boolean; station_ready?:boolean; station_sync_error?:string;
+  station_pending_print_ids?:number[];
+  station_pickup_ids?:number[];
 };
 
-const apiBase = typeof window !== "undefined" && window.location.hostname === "printer.7988798.xyz"
-  ? "" : "https://printer.7988798.xyz";
+const apiBase = "";
 
 async function request(path:string, init?:RequestInit):Promise<Snapshot>{
   const response=await fetch(apiBase+path,{credentials:"include",...init});
   let body:Snapshot;
   try{body=await response.json() as Snapshot}catch{throw new Error(`云端返回异常（HTTP ${response.status}），请重新登录后再试`)}
+  if(response.status===401&&typeof window!=="undefined")window.location.assign("/login");
   if(!response.ok||!body.ok)throw new Error(body.error||"云端请求失败");
   return body;
 }
@@ -28,8 +33,10 @@ export function toState(data:Snapshot):State{
   const jobs:Job[]=data.tasks.map(task=>({
     id:task.id,title:task.title,school:task.school,grade:task.grade,classes:task.classes,
     copies:task.copies_per_class||task.copies,pages:task.pages,user:task.source_user,
-    status:statuses[task.status]||task.status,progress:task.status==="DONE"?100:0,
+    status:task.status==="QUEUED"&&(!!task.claimed||data.station_pending_print_ids?.includes(task.id))
+      ?"待下发":statuses[task.status]||task.status,progress:task.status==="DONE"?100:0,
     device:null,deviceName:"—",allocations:[],local:task.source_user===username,
+    pickable:data.station_pickup_ids?.includes(task.id)||false,
     createdAt:iso(task.created_at),completedAt:task.done_at?iso(task.done_at):null,
     duplex:"双面",color:"黑白",
   }));
@@ -43,7 +50,46 @@ export const saveSchool=(id:number|null,input:Omit<Preset,"id">)=>request(
   });
 export const deleteSchool=(id:number)=>request(`/api/v1/schools/${id}`,{method:"DELETE"});
 export const cancelTask=(id:number)=>request(`/api/v1/tasks/${id}/cancel`,{method:"POST"});
-type UploadReply={ok:boolean;task_id:number;upload_url?:string;error?:string};
+export type ManagedUser={id:number;username:string;role:"user"|"superadmin";active:number;display_name:string;created_at:number};
+export type AdminOverview={ok:boolean;error?:string;users:ManagedUser[];schools:Preset[];invite_code:string};
+async function adminRequest(path:string,init?:RequestInit):Promise<AdminOverview>{
+  const response=await fetch(apiBase+path,{credentials:"include",...init});
+  const body=await response.json() as AdminOverview;
+  if(response.status===401&&typeof window!=="undefined")window.location.assign("/login");
+  if(!response.ok||!body.ok)throw new Error(body.error||"管理操作失败");
+  return body;
+}
+const jsonBody=(value:unknown):RequestInit=>({headers:{"Content-Type":"application/json"},body:JSON.stringify(value)});
+export const loadAdmin=()=>adminRequest("/api/v1/admin/overview");
+export const createManagedUser=(value:{username:string;password:string;role:ManagedUser["role"]})=>adminRequest("/api/v1/admin/users",{method:"POST",...jsonBody(value)});
+export const updateManagedUser=(id:number,value:{role:ManagedUser["role"];active:boolean;password?:string})=>adminRequest(`/api/v1/admin/users/${id}`,{method:"PUT",...jsonBody(value)});
+export const deleteManagedUser=(id:number)=>adminRequest(`/api/v1/admin/users/${id}`,{method:"DELETE"});
+export const updateInviteCode=(invite_code:string)=>adminRequest("/api/v1/admin/invite",{method:"PUT",...jsonBody({invite_code})});
+export type Account={username:string;role:"user"|"superadmin";display_name:string};
+async function accountRequest(init?:RequestInit):Promise<{ok:boolean;error?:string;account:Account}>{
+  const response=await fetch(apiBase+"/api/v1/account",{credentials:"include",...init});
+  const body=await response.json() as {ok:boolean;error?:string;account:Account};
+  if(response.status===401&&typeof window!=="undefined")window.location.assign("/login");
+  if(!response.ok||!body.ok)throw new Error(body.error||"用户中心操作失败");
+  return body;
+}
+export const loadAccount=()=>accountRequest();
+export const updateAccount=(value:{display_name:string;old_password?:string;new_password?:string})=>accountRequest({method:"PUT",...jsonBody(value)});
+type LocalReply={ok:boolean;error?:string;printers?:{queue:string;driver:string;port:string}[]};
+async function localRequest(path:string,init?:RequestInit):Promise<LocalReply>{
+  const response=await fetch(path,{credentials:"include",...init});
+  let body:LocalReply;
+  try{body=await response.json() as LocalReply}catch{throw new Error(`本机打印站返回异常（HTTP ${response.status}）`)}
+  if(response.status===401){window.location.assign("/login");throw new Error("登录已失效")}
+  if(!response.ok||!body.ok)throw new Error(body.error||"本机打印站操作失败");
+  return body;
+}
+const jsonPost=(body:unknown):RequestInit=>({method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+export const installedPrinters=async()=> (await localRequest("/desktop/printers/available")).printers||[];
+export const addPrinter=(input:{name:string;queue:string;ip:string})=>localRequest("/desktop/printers",jsonPost(input));
+export const printTask=(id:number,printerIds:number[])=>localRequest(`/desktop/tasks/${id}/print`,jsonPost({printer_ids:printerIds}));
+export const confirmPickup=(id:number)=>localRequest(`/desktop/tasks/${id}/pickup`,{method:"POST"});
+type UploadReply={ok:boolean;task_id?:number;storage_backend?:"local";upload_url?:string;error?:string};
 async function uploadRequest(path:string,init:RequestInit):Promise<UploadReply>{
   const response=await fetch(apiBase+path,{credentials:"include",...init});
   let body:UploadReply;
@@ -72,7 +118,16 @@ export const uploadTask=async (
       classes:input.classes,copies:input.copies,pages:input.pages,
     }),
   });
-  if(!prepared.upload_url)throw new Error("云端未返回 COS 上传地址");
+  if(prepared.storage_backend==="local"){
+    const form=new FormData();
+    form.set("file",input.file);form.set("school",input.school);form.set("grade",input.grade);
+    form.set("classes",String(input.classes));form.set("copies",String(input.copies));
+    form.set("pages",String(input.pages));
+    const result=await uploadRequest("/api/v1/tasks",{method:"POST",body:form});
+    onProgress?.(100);
+    return result;
+  }
+  if(!prepared.upload_url||!prepared.task_id)throw new Error("云端未返回 COS 上传地址");
   try{
     await putToCos(prepared.upload_url,input.file,onProgress);
     return await uploadRequest(`/api/v1/uploads/${prepared.task_id}/complete`,{method:"POST"});

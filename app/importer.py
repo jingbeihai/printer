@@ -39,16 +39,20 @@ def create_local_task(cloud_id: int, title: str, pdf_path, copies: int,
     meta = meta or {}
     source = meta.get("source_user", "")
 
+    prepared = []
+    for i, c in enumerate(chunks, 1):
+        label = f"小组 {i}/{n}"
+        composed = config.COMPOSED_DIR / f"task{cloud_id}_g{i:03d}.pdf"
+        _, sheets = compose_group_pdf(pdf_path, composed, title, label, c, source)
+        prepared.append((i, label, c, sheets, composed))
+
     tid = db.execute(
         "INSERT INTO local_tasks(cloud_id,title,meta_json,copies,pages,pdf_path,"
         "status,priority,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
         (cloud_id, title, json.dumps(meta, ensure_ascii=False), copies, pages,
          str(pdf_path), TaskStatus.QUEUED.value, priority, time.time()),
     )
-    for i, c in enumerate(chunks, 1):
-        label = f"小组 {i}/{n}"
-        composed = config.COMPOSED_DIR / f"task{cloud_id}_g{i:03d}.pdf"
-        _, sheets = compose_group_pdf(pdf_path, composed, title, label, c, source)
+    for i, label, c, sheets, composed in prepared:
         db.execute(
             "INSERT INTO groups(task_id,seq,label,pdf_path,pages,copies,sheets,"
             "composed_path,status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -57,7 +61,8 @@ def create_local_task(cloud_id: int, title: str, pdf_path, copies: int,
         )
     db.log_event("TASK_SYNCED",
                  f"云端任务#{cloud_id}《{title}》{pages}页×{copies}份,拆{n}组", task_id=tid)
-    maybe_release_next_task()
+    if not config.MANUAL_PRINT:
+        maybe_release_next_task()
     return tid
 
 
@@ -72,8 +77,12 @@ def maybe_release_next_task():
     """无活动任务时,把队首任务(优先级高者先,同优先级按云端ID)置为 PRINTING。"""
     if current_active_task():
         return
-    nxt = db.one("SELECT * FROM local_tasks WHERE status='QUEUED'"
-                 " ORDER BY priority DESC, cloud_id LIMIT 1")
+    if config.MANUAL_PRINT:
+        nxt = db.one("SELECT * FROM local_tasks WHERE status='QUEUED' AND print_requested=1"
+                     " ORDER BY print_requested_at, priority DESC, cloud_id LIMIT 1")
+    else:
+        nxt = db.one("SELECT * FROM local_tasks WHERE status='QUEUED'"
+                     " ORDER BY priority DESC, cloud_id LIMIT 1")
     if nxt:
         db.execute("UPDATE local_tasks SET status='PRINTING' WHERE id=?", (nxt["id"],))
         db.log_event("TASK_STARTED", f"任务《{nxt['title']}》开闸", task_id=nxt["id"])

@@ -24,12 +24,12 @@ CLOUD_DB_URL = os.environ.get("PRINT_CLOUD_DB_URL", "")
 BACKEND = os.environ.get("PRINT_BACKEND", "sim")
 
 # ---------- 云端 server ----------
-SERVER_PORT = int(os.environ.get("PRINT_PORT", "8000"))
+SERVER_PORT = int(os.environ.get("PRINT_PORT", "8011"))
 SECRET = os.environ.get("PRINT_SECRET", "change-me-print-cluster")
-INVITE_CODE = os.environ.get("PRINT_INVITE_CODE", "101010")
+INVITE_CODE = os.environ.get("PRINT_INVITE_CODE", "")
 # 仅在数据库还没有任何用户时创建首个管理员；后续修改环境变量不会重置密码。
 BOOTSTRAP_ADMIN_USERNAME = os.environ.get("PRINT_BOOTSTRAP_ADMIN_USERNAME", "admin")
-BOOTSTRAP_ADMIN_PASSWORD = os.environ.get("PRINT_BOOTSTRAP_ADMIN_PASSWORD", "262626")
+BOOTSTRAP_ADMIN_PASSWORD = os.environ.get("PRINT_BOOTSTRAP_ADMIN_PASSWORD", "")
 FILE_RETENTION_DAYS = int(os.environ.get("PRINT_RETENTION_DAYS", "30"))  # 上传PDF保留天数
 
 # ---------- 云端文件存储：服务器本地磁盘 / 腾讯云 COS ----------
@@ -46,6 +46,7 @@ CLOUD_URL = os.environ.get("PRINT_CLOUD_URL", "https://printer.7988798.xyz")
 AGENT_TOKEN = os.environ.get("PRINT_AGENT_TOKEN", "")     # 仅服务器/打印站本机配置
 AGENT_PORT = int(os.environ.get("PRINT_AGENT_PORT", "8001"))
 SYNC_INTERVAL = int(os.environ.get("PRINT_SYNC_INTERVAL", "30"))   # 与云端同步周期(秒)
+MANUAL_PRINT = False  # 桌面打印站启用；独立 agent 保持自动调度。
 LOCAL_PASSWORD = os.environ.get("PRINT_LOCAL_PASSWORD", "")        # 本地网页口令,空=免登录
 PRINT_WINDOW = os.environ.get("PRINT_WINDOW", "")                  # 如 "13:00-18:00",空=全天
 

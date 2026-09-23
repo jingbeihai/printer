@@ -10,6 +10,7 @@ import json
 import secrets
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request, Response, UploadFile
@@ -19,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config, db, importer, storage
 from .compose import sheets_per_copy
-from .models import ROLE_ADMIN, TASK_STATUS_CN, TaskStatus
+from .models import ROLE_ADMIN, ROLE_SUPERADMIN, ROLE_USER, TASK_STATUS_CN, TaskStatus
 from .webcommon import hash_password, make_session, read_session, render, verify_password
 
 SESSION_COOKIE = "pc_session"
@@ -28,26 +29,43 @@ SESSION_COOKIE = "pc_session"
 # ---------------- 初始化与公共 ----------------
 
 def ensure_defaults():
-    if config.INVITE_CODE:
-        db.set_conf("invite_code", config.INVITE_CODE)
+    if config.SECRET == "change-me-print-cluster":
+        secret = db.get_conf("session_secret")
+        if not secret:
+            secret = secrets.token_urlsafe(48)
+            db.set_conf("session_secret", secret)
+        config.SECRET = secret
+    if not db.get_conf("invite_code") or (
+            db.get_conf("invite_code") == "101010" and not config.INVITE_CODE):
+        db.set_conf("invite_code", config.INVITE_CODE or secrets.token_urlsafe(12))
     # 显式环境变量始终覆盖旧值，便于管理员轮换打印站凭据；
     # 未提供时首次自动生成，绝不再使用公开的开发默认值。
     if config.AGENT_TOKEN:
         db.set_conf("agent_token", config.AGENT_TOKEN)
     elif not db.get_conf("agent_token"):
         db.set_conf("agent_token", secrets.token_urlsafe(32))
-    # 首次初始化自动创建管理员。已有用户时绝不覆盖已有账号或密码。
+    # 首次初始化创建超级管理员；升级旧库时保留原密码并提升最早的管理员。
     if db.one("SELECT COUNT(*) c FROM users")["c"] == 0:
+        if len(config.BOOTSTRAP_ADMIN_PASSWORD) < 8:
+            raise RuntimeError("首次部署请设置 PRINT_BOOTSTRAP_ADMIN_PASSWORD（至少 8 位）")
         db.execute("INSERT INTO users(username,pw_hash,role,created_at) VALUES(?,?,?,?)",
                    (config.BOOTSTRAP_ADMIN_USERNAME,
-                    hash_password(config.BOOTSTRAP_ADMIN_PASSWORD), ROLE_ADMIN, time.time()))
+                    hash_password(config.BOOTSTRAP_ADMIN_PASSWORD), ROLE_SUPERADMIN, time.time()))
+    elif not db.one("SELECT id FROM users WHERE role=?", (ROLE_SUPERADMIN,)):
+        oldest = db.one("SELECT id FROM users WHERE role=? ORDER BY id LIMIT 1", (ROLE_ADMIN,))
+        if not oldest:
+            oldest = db.one("SELECT id FROM users ORDER BY id LIMIT 1")
+        if oldest:
+            db.execute("UPDATE users SET role=?,active=1 WHERE id=?",
+                       (ROLE_SUPERADMIN, oldest["id"]))
+    db.execute("UPDATE users SET role=? WHERE role IN ('admin','teacher')", (ROLE_USER,))
 
 
 def current_user(req: Request):
     s = read_session(req.cookies.get(SESSION_COOKIE))
     if not s:
         return None
-    return db.one("SELECT * FROM users WHERE id=?", (s.get("uid"),))
+    return db.one("SELECT * FROM users WHERE id=? AND active=1", (s.get("uid"),))
 
 
 def require_user(req: Request):
@@ -63,6 +81,20 @@ def save_upload_by_date(task_id: int, up: UploadFile, content: bytes) -> str:
 
 def cleanup_old_uploads():
     cutoff = time.time() - config.FILE_RETENTION_DAYS * 86400
+    # 按数据库位置清理 COS 文件，也覆盖切回 local 后遗留的对象。
+    for task in db.q("SELECT id,pdf_path FROM tasks WHERE pdf_path LIKE 'cos://%' AND created_at<?",
+                     (cutoff,)):
+        try:
+            storage.remove(task["pdf_path"])
+        except Exception as exc:
+            # 保留地址，下次清理重试；单个对象失败不阻断其他文件。
+            db.log_event("RETENTION_PURGE_FAILED", str(exc), task_id=task["id"],
+                         table="task_events")
+            continue
+        db.execute("UPDATE tasks SET pdf_path='' WHERE id=? AND pdf_path=?",
+                   (task["id"], task["pdf_path"]))
+        db.log_event("RETENTION_PURGE", f"已按{config.FILE_RETENTION_DAYS}天留存策略删除 COS 文件",
+                     task_id=task["id"], table="task_events")
     for d in sorted(config.UPLOAD_DIR.glob("*")):
         if not d.is_dir():
             continue
@@ -99,28 +131,20 @@ def create_app() -> FastAPI:
     # ---------- 认证 ----------
     @app.get("/register", response_class=HTMLResponse)
     def register_page(req: Request):
-        return render("register.html", error="", invite="",
-                      first_setup=db.one("SELECT COUNT(*) c FROM users")["c"] == 0)
+        return render("register.html", error="", invite="")
 
     @app.post("/register")
     def register(username: str = Form(...), password: str = Form(...),
                  invite: str = Form(...)):
         username = username.strip()
-        first_setup = db.one("SELECT COUNT(*) c FROM users")["c"] == 0
-        if not username or len(password) < 4:
-            return render("register.html", error="用户名必填，密码至少 4 位", invite=invite,
-                          first_setup=first_setup)
+        if not username or len(username) > 80 or len(password) < 8:
+            return render("register.html", error="用户名必填，密码至少 8 位", invite=invite)
         if invite.strip() != db.get_conf("invite_code"):
-            return render("register.html",
-                          error="邀请码不匹配。请在服务器本机运行 python run.py invite 获取当前邀请码；不要填写代理 Token。",
-                          invite=invite, first_setup=first_setup)
+            return render("register.html", error="邀请码不正确，请向公司管理员索取", invite=invite)
         if db.one("SELECT id FROM users WHERE username=?", (username,)):
-            return render("register.html", error="用户名已存在", invite=invite,
-                          first_setup=first_setup)
-        first = db.one("SELECT COUNT(*) c FROM users")["c"] == 0
-        role = ROLE_ADMIN if first else "teacher"
+            return render("register.html", error="用户名已存在", invite=invite)
         uid = db.execute("INSERT INTO users(username,pw_hash,role,created_at) VALUES(?,?,?,?)",
-                         (username, hash_password(password), role, time.time()))
+                         (username, hash_password(password), ROLE_USER, time.time()))
         resp = RedirectResponse("/desk/", 303)
         resp.set_cookie(SESSION_COOKIE, make_session({"uid": uid}), httponly=True)
         return resp
@@ -132,7 +156,7 @@ def create_app() -> FastAPI:
     @app.post("/login")
     def login(username: str = Form(...), password: str = Form(...)):
         u = db.one("SELECT * FROM users WHERE username=?", (username.strip(),))
-        if not u or not verify_password(password, u["pw_hash"]):
+        if not u or not u["active"] or not verify_password(password, u["pw_hash"]):
             return render("login.html", error="用户名或密码错误")
         resp = RedirectResponse("/desk/", 303)
         resp.set_cookie(SESSION_COOKIE, make_session({"uid": u["id"]}), httponly=True)
@@ -163,6 +187,7 @@ def create_app() -> FastAPI:
 
     def api_task(row):
         task = dict(row)
+        task["claimed"] = bool(task.pop("claimed_client_id", ""))
         task["copies_per_class"] = task.get("copies_per_class") or (
             max(1, task["copies"] // task["classes"]) if task["classes"] else task["copies"])
         task["status_label"] = TASK_STATUS_CN.get(task["status"], task["status"])
@@ -184,7 +209,9 @@ def create_app() -> FastAPI:
                       task["done_at"] and task["done_at"] >= month_start]
         return {
             "ok": True,
-            "user": {"username": user["username"], "role": user["role"]},
+            "user": {"username": user["username"], "role": user["role"],
+                     "display_name": user["display_name"]},
+            "client_kind": "web",
             "now": now,
             "tasks": tasks,
             "presets": school_presets(),
@@ -205,8 +232,8 @@ def create_app() -> FastAPI:
         user, error = api_user(req)
         if error:
             return error
-        if user["role"] != ROLE_ADMIN:
-            return JSONResponse({"ok": False, "error": "仅管理员可维护学校"}, status_code=403)
+        if user["role"] != ROLE_SUPERADMIN:
+            return JSONResponse({"ok": False, "error": "仅超级管理员可维护学校"}, status_code=403)
         body = await req.json()
         school, grade = str(body.get("school", "")).strip(), str(body.get("grade", "")).strip()
         try:
@@ -225,8 +252,8 @@ def create_app() -> FastAPI:
         user, error = api_user(req)
         if error:
             return error
-        if user["role"] != ROLE_ADMIN:
-            return JSONResponse({"ok": False, "error": "仅管理员可维护学校"}, status_code=403)
+        if user["role"] != ROLE_SUPERADMIN:
+            return JSONResponse({"ok": False, "error": "仅超级管理员可维护学校"}, status_code=403)
         body = await req.json()
         school, grade = str(body.get("school", "")).strip(), str(body.get("grade", "")).strip()
         try:
@@ -246,10 +273,134 @@ def create_app() -> FastAPI:
         user, error = api_user(req)
         if error:
             return error
-        if user["role"] != ROLE_ADMIN:
-            return JSONResponse({"ok": False, "error": "仅管理员可维护学校"}, status_code=403)
+        if user["role"] != ROLE_SUPERADMIN:
+            return JSONResponse({"ok": False, "error": "仅超级管理员可维护学校"}, status_code=403)
         db.execute("DELETE FROM school_presets WHERE id=?", (sid,))
         return api_snapshot(req)
+
+    # 用户和邀请码只在云端管理；客户端即使访问代理接口也要再次经过此处鉴权。
+    def api_superadmin(req: Request):
+        user, error = api_user(req)
+        if error:
+            return None, error
+        if user["role"] != ROLE_SUPERADMIN:
+            return None, JSONResponse({"ok": False, "error": "仅超级管理员可操作"}, status_code=403)
+        return user, None
+
+    def public_users():
+        return [dict(row) for row in db.q(
+            "SELECT id,username,role,active,display_name,created_at FROM users ORDER BY id")]
+
+    def admin_snapshot():
+        return {"ok": True, "users": public_users(), "schools": school_presets(),
+                "invite_code": db.get_conf("invite_code")}
+
+    @app.get("/api/v1/admin/overview")
+    def api_admin_overview(req: Request):
+        _, error = api_superadmin(req)
+        return error or admin_snapshot()
+
+    @app.post("/api/v1/admin/users")
+    async def api_admin_create_user(req: Request):
+        _, error = api_superadmin(req)
+        if error:
+            return error
+        body = await req.json()
+        username = str(body.get("username", "")).strip()
+        password = str(body.get("password", ""))
+        role = str(body.get("role", ROLE_USER))
+        if not username or len(username) > 80 or len(password) < 8 or role not in (
+                ROLE_USER, ROLE_SUPERADMIN):
+            return JSONResponse({"ok": False, "error": "用户名不能为空，密码至少 8 位，并请选择有效角色"}, status_code=400)
+        if db.one("SELECT id FROM users WHERE username=?", (username,)):
+            return JSONResponse({"ok": False, "error": "用户名已存在"}, status_code=409)
+        db.execute("INSERT INTO users(username,pw_hash,role,active,created_at) VALUES(?,?,?,?,?)",
+                   (username, hash_password(password), role, 1, time.time()))
+        return admin_snapshot()
+
+    @app.put("/api/v1/admin/users/{uid}")
+    async def api_admin_update_user(req: Request, uid: int):
+        actor, error = api_superadmin(req)
+        if error:
+            return error
+        target = db.one("SELECT * FROM users WHERE id=?", (uid,))
+        if not target:
+            return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
+        body = await req.json()
+        role = str(body.get("role", target["role"]))
+        active = body.get("active", bool(target["active"]))
+        password = body.get("password", "")
+        if role not in (ROLE_USER, ROLE_SUPERADMIN) or not isinstance(active, bool):
+            return JSONResponse({"ok": False, "error": "角色或状态无效"}, status_code=400)
+        if password and (not isinstance(password, str) or len(password) < 8):
+            return JSONResponse({"ok": False, "error": "新密码至少 8 位"}, status_code=400)
+        if uid == actor["id"] and (role != ROLE_SUPERADMIN or not active):
+            return JSONResponse({"ok": False, "error": "不能停用或降级当前账号"}, status_code=400)
+        if target["role"] == ROLE_SUPERADMIN and (role != ROLE_SUPERADMIN or not active):
+            remaining = db.one("SELECT COUNT(*) c FROM users WHERE role=? AND active=1 AND id<>?",
+                               (ROLE_SUPERADMIN, uid))["c"]
+            if not remaining:
+                return JSONResponse({"ok": False, "error": "必须保留一名启用的超级管理员"}, status_code=400)
+        db.execute("UPDATE users SET role=?,active=? WHERE id=?", (role, int(active), uid))
+        if password:
+            db.execute("UPDATE users SET pw_hash=? WHERE id=?", (hash_password(password), uid))
+        return admin_snapshot()
+
+    @app.delete("/api/v1/admin/users/{uid}")
+    def api_admin_delete_user(req: Request, uid: int):
+        actor, error = api_superadmin(req)
+        if error:
+            return error
+        target = db.one("SELECT id,role FROM users WHERE id=?", (uid,))
+        if not target:
+            return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
+        if uid == actor["id"]:
+            return JSONResponse({"ok": False, "error": "不能删除当前账号"}, status_code=400)
+        if target["role"] == ROLE_SUPERADMIN and not db.one(
+                "SELECT id FROM users WHERE role=? AND active=1 AND id<>?",
+                (ROLE_SUPERADMIN, uid)):
+            return JSONResponse({"ok": False, "error": "必须保留一名启用的超级管理员"}, status_code=400)
+        db.execute("DELETE FROM users WHERE id=?", (uid,))
+        return admin_snapshot()
+
+    @app.put("/api/v1/admin/invite")
+    async def api_admin_invite(req: Request):
+        _, error = api_superadmin(req)
+        if error:
+            return error
+        body = await req.json()
+        code = str(body.get("invite_code", "")).strip()
+        if not 6 <= len(code) <= 80:
+            return JSONResponse({"ok": False, "error": "邀请码应为 6 至 80 个字符"}, status_code=400)
+        db.set_conf("invite_code", code)
+        return admin_snapshot()
+
+    @app.get("/api/v1/account")
+    def api_account(req: Request):
+        user, error = api_user(req)
+        if error:
+            return error
+        return {"ok": True, "account": {"username": user["username"], "role": user["role"],
+                "display_name": user["display_name"]}}
+
+    @app.put("/api/v1/account")
+    async def api_account_update(req: Request):
+        user, error = api_user(req)
+        if error:
+            return error
+        body = await req.json()
+        display_name = str(body.get("display_name", user["display_name"])).strip()
+        old_password = str(body.get("old_password", ""))
+        new_password = str(body.get("new_password", ""))
+        if len(display_name) > 80:
+            return JSONResponse({"ok": False, "error": "姓名不能超过 80 字"}, status_code=400)
+        if new_password:
+            if len(new_password) < 8 or not verify_password(old_password, user["pw_hash"]):
+                return JSONResponse({"ok": False, "error": "原密码不正确，或新密码少于 8 位"}, status_code=400)
+            db.execute("UPDATE users SET pw_hash=? WHERE id=?",
+                       (hash_password(new_password), user["id"]))
+        db.execute("UPDATE users SET display_name=? WHERE id=?", (display_name, user["id"]))
+        return api_account(req)
 
     @app.post("/api/v1/tasks/{tid}/cancel")
     def api_task_cancel(req: Request, tid: int):
@@ -259,7 +410,7 @@ def create_app() -> FastAPI:
         task = db.one("SELECT * FROM tasks WHERE id=?", (tid,))
         if not task:
             return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
-        if task["source_user"] != user["username"] and user["role"] != ROLE_ADMIN:
+        if task["source_user"] != user["username"] and user["role"] != ROLE_SUPERADMIN:
             return JSONResponse({"ok": False, "error": "只能取消自己提交的任务"}, status_code=403)
         if task["status"] in (TaskStatus.DONE.value, TaskStatus.CANCELED.value):
             return JSONResponse({"ok": False, "error": "该任务不能取消"}, status_code=400)
@@ -267,12 +418,59 @@ def create_app() -> FastAPI:
         db.log_event("TASK_CANCELED", f"{user['username']} 取消任务", task_id=tid, table="task_events")
         return api_snapshot(req)
 
+    @app.post("/api/v1/tasks/{tid}/claim")
+    async def api_task_claim(req: Request, tid: int):
+        user, error = api_user(req)
+        if error:
+            return error
+        body = await req.json()
+        try:
+            client_id = str(uuid.UUID(str(body.get("client_id", ""))))
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "客户端标识无效"}, status_code=400)
+        task = db.one("SELECT id,status,claimed_client_id FROM tasks WHERE id=?", (tid,))
+        if not task:
+            return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+        if task["status"] != "QUEUED":
+            return JSONResponse({"ok": False, "error": "任务已经开始或结束"}, status_code=409)
+        if task["claimed_client_id"] == client_id:
+            return {"ok": True}
+        changed = db.update_count(
+            "UPDATE tasks SET claimed_client_id=?, print_requested_at=? "
+            "WHERE id=? AND status='QUEUED' AND claimed_client_id=''",
+            (client_id, time.time(), tid))
+        if not changed:
+            return JSONResponse({"ok": False, "error": "任务已由另一台电脑领取"}, status_code=409)
+        db.log_event("TASK_CLAIMED", f"{user['username']} 领取打印", task_id=tid, table="task_events")
+        return {"ok": True}
+
+    @app.post("/api/v1/tasks/{tid}/release")
+    async def api_task_release(req: Request, tid: int):
+        user, error = api_user(req)
+        if error:
+            return error
+        body = await req.json()
+        try:
+            client_id = str(uuid.UUID(str(body.get("client_id", ""))))
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "客户端标识无效"}, status_code=400)
+        changed = db.update_count(
+            "UPDATE tasks SET claimed_client_id='', print_requested_at=0 "
+            "WHERE id=? AND status='QUEUED' AND claimed_client_id=?",
+            (tid, client_id))
+        if changed:
+            db.log_event("TASK_RELEASED", f"{user['username']} 释放领取", task_id=tid,
+                         table="task_events")
+        return {"ok": True}
+
     @app.post("/api/v1/uploads/presign")
     async def api_upload_presign(req: Request):
         """创建上传占位任务，并签发只允许写入该对象的短期 COS URL。"""
         user, error = api_user(req)
         if error:
             return error
+        if config.STORAGE_BACKEND == "local":
+            return {"ok": True, "storage_backend": "local"}
         if config.STORAGE_BACKEND != "cos":
             return JSONResponse({"ok": False, "error": "云端尚未启用腾讯云 COS 直传"},
                                 status_code=503)
@@ -470,12 +668,12 @@ def create_app() -> FastAPI:
         history = db.q("SELECT * FROM tasks WHERE status IN ('DONE','CANCELED')"
                        " ORDER BY id DESC LIMIT 30")
         return render("queue.html", user=u, tasks=tasks, history=history,
-                      cn=TASK_STATUS_CN, admin=u["role"] == ROLE_ADMIN)
+                      cn=TASK_STATUS_CN, admin=u["role"] in (ROLE_ADMIN, ROLE_SUPERADMIN))
 
     @app.post("/admin/task/{tid}/top")
     def task_top(req: Request, tid: int):
         u = require_user(req)
-        if not u or u["role"] != ROLE_ADMIN:
+        if not u or u["role"] not in (ROLE_ADMIN, ROLE_SUPERADMIN):
             return RedirectResponse("/login", 303)
         maxp = db.one("SELECT COALESCE(MAX(priority),0) m FROM tasks")["m"]
         db.execute("UPDATE tasks SET priority=? WHERE id=?", (maxp + 1, tid))
@@ -485,7 +683,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/task/{tid}/cancel")
     def task_cancel(req: Request, tid: int):
         u = require_user(req)
-        if not u or u["role"] != ROLE_ADMIN:
+        if not u or u["role"] not in (ROLE_ADMIN, ROLE_SUPERADMIN):
             return RedirectResponse("/login", 303)
         db.execute("UPDATE tasks SET status='CANCELED', done_at=? WHERE id=?",
                    (time.time(), tid))
@@ -574,7 +772,7 @@ def create_app() -> FastAPI:
     @app.get("/admin", response_class=HTMLResponse)
     def admin_page(req: Request):
         u = require_user(req)
-        if not u or u["role"] != ROLE_ADMIN:
+        if not u or u["role"] != ROLE_SUPERADMIN:
             return RedirectResponse("/login", 303)
         users = db.q("SELECT * FROM users ORDER BY id")
         schools = school_presets()
@@ -584,25 +782,26 @@ def create_app() -> FastAPI:
     @app.post("/admin/users/{uid}/delete")
     def delete_user(req: Request, uid: int):
         u = require_user(req)
-        if not u or u["role"] != ROLE_ADMIN:
+        if not u or u["role"] != ROLE_SUPERADMIN:
             return RedirectResponse("/login", 303)
-        if uid != u["id"]:
+        target = db.one("SELECT role FROM users WHERE id=?", (uid,))
+        if uid != u["id"] and target and target["role"] != ROLE_SUPERADMIN:
             db.execute("DELETE FROM users WHERE id=?", (uid,))
         return RedirectResponse("/admin", 303)
 
     @app.post("/admin/users/{uid}/promote")
     def promote_user(req: Request, uid: int):
         u = require_user(req)
-        if not u or u["role"] != ROLE_ADMIN:
+        if not u or u["role"] != ROLE_SUPERADMIN:
             return RedirectResponse("/login", 303)
-        db.execute("UPDATE users SET role='admin' WHERE id=?", (uid,))
+        db.execute("UPDATE users SET role=? WHERE id=?", (ROLE_SUPERADMIN, uid))
         return RedirectResponse("/admin", 303)
 
     @app.post("/admin/schools/add")
     def add_school(req: Request, school: str = Form(...), grade: str = Form(...),
                    classes: int = Form(0), copies: int = Form(1)):
         u = require_user(req)
-        if not u or u["role"] != ROLE_ADMIN:
+        if not u or u["role"] != ROLE_SUPERADMIN:
             return RedirectResponse("/login", 303)
         school, grade = school.strip(), grade.strip()
         if school and grade and classes >= 0 and copies >= 1:
@@ -615,7 +814,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/schools/{sid}/delete")
     def delete_school(req: Request, sid: int):
         u = require_user(req)
-        if not u or u["role"] != ROLE_ADMIN:
+        if not u or u["role"] != ROLE_SUPERADMIN:
             return RedirectResponse("/login", 303)
         db.execute("DELETE FROM school_presets WHERE id=?", (sid,))
         return RedirectResponse("/admin", 303)
@@ -623,7 +822,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/settings")
     def settings(req: Request, invite: str = Form("")):
         u = require_user(req)
-        if not u or u["role"] != ROLE_ADMIN:
+        if not u or u["role"] != ROLE_SUPERADMIN:
             return RedirectResponse("/login", 303)
         if invite.strip():
             db.set_conf("invite_code", invite.strip())
@@ -631,18 +830,30 @@ def create_app() -> FastAPI:
 
     # ---------- 代理接口 ----------
     def check_agent(req: Request):
-        return req.headers.get("X-Agent-Token", "") == db.get_conf("agent_token")
+        token = req.headers.get("X-Agent-Token", "")
+        expected = db.get_conf("agent_token")
+        return bool(token and expected and secrets.compare_digest(token, expected))
 
     @app.post("/api/agent/sync")
     async def agent_sync(req: Request):
-        if not check_agent(req):
+        legacy_agent = check_agent(req)
+        user = current_user(req) if not legacy_agent else None
+        if not legacy_agent and not user:
             return JSONResponse({"ok": False, "error": "token invalid"}, status_code=401)
         body = await req.json()
+        client_id = str(body.get("client_id", "")) if not legacy_agent else ""
+        if not legacy_agent:
+            try:
+                client_id = str(uuid.UUID(client_id))
+            except ValueError:
+                return JSONResponse({"ok": False, "error": "客户端标识无效"}, status_code=400)
         states = body.get("task_states", {})
         now = time.time()
         for cid, st in states.items():
             t = db.one("SELECT * FROM tasks WHERE id=?", (int(cid),))
             if not t or t["status"] in ("DONE", "CANCELED"):
+                continue
+            if not legacy_agent and t["claimed_client_id"] != client_id:
                 continue
             if st in (TaskStatus.PRINTING.value, TaskStatus.AWAITING_PICKUP.value,
                       TaskStatus.DONE.value):
@@ -658,8 +869,9 @@ def create_app() -> FastAPI:
                     db.log_event("AGENT_REPORT", f"状态 → {st}", task_id=int(cid),
                                  table="task_events")
         # 后台页数核对完成前不派发，避免打印站拿到 pages=0 的占位任务。
-        queued = db.q("SELECT * FROM tasks WHERE status='QUEUED' AND pages>0"
-                      " ORDER BY priority DESC, id")
+        queue_filter = " AND claimed_client_id=''" if legacy_agent else ""
+        queued = db.q("SELECT * FROM tasks WHERE status='QUEUED' AND pages>0" +
+                      queue_filter + " ORDER BY priority DESC, id")
         canceled = [r["id"] for r in db.q("SELECT id FROM tasks WHERE status='CANCELED'")]
         priorities = {str(r["id"]): r["priority"] for r in
                       db.q("SELECT id,priority FROM tasks WHERE status NOT IN ('DONE','CANCELED')")}
@@ -673,11 +885,15 @@ def create_app() -> FastAPI:
 
     @app.get("/api/agent/file/{tid}")
     def agent_file(req: Request, tid: int):
-        if not check_agent(req):
+        legacy_agent = check_agent(req)
+        user = current_user(req) if not legacy_agent else None
+        if not legacy_agent and not user:
             return JSONResponse({"ok": False, "error": "token invalid"}, status_code=401)
         t = db.one("SELECT * FROM tasks WHERE id=?", (tid,))
         if not t or not t["pdf_path"]:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        if not legacy_agent and t["status"] != "QUEUED":
+            return JSONResponse({"ok": False, "error": "只能下载尚未开始的排队任务"}, status_code=403)
         direct_url = storage.download_url(t["pdf_path"])
         if direct_url:
             # requests 默认跟随重定向；打印站由 COS 直下，不让 PDF 再穿过 Tunnel。

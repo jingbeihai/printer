@@ -1,0 +1,115 @@
+import io
+import tempfile
+import time
+import unittest
+import uuid
+from pathlib import Path
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+from pypdf import PdfWriter
+from app import config, db, server_web
+from app.webcommon import make_session
+
+
+class UploadRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.uploads = Path(self.temp.name)
+        for name, value in [('UPLOAD_DIR', self.uploads), ('STORAGE_BACKEND', 'local'),
+                            ('BOOTSTRAP_ADMIN_PASSWORD', 'test-password-123')]:
+            mock = patch.object(config, name, value)
+            mock.start()
+            self.addCleanup(mock.stop)
+        db.init(':memory:', db.SERVER_SCHEMA)
+        self.addCleanup(lambda: db._conn.close())
+        with patch.object(server_web, 'start_retention_thread'):
+            self.client = TestClient(server_web.create_app())
+        self.addCleanup(self.client.close)
+        self.client.cookies.set(server_web.SESSION_COOKIE, make_session({'uid': 1}))
+        db.execute("INSERT INTO school_presets(school,grade,classes,copies) VALUES('School','Grade',1,2)")
+        self.meta = dict(school='School', grade='Grade', classes=1, copies=2, pages=1,
+                         filename='sample.pdf', size=100)
+
+    def test_local_upload_and_download(self):
+        reply = self.client.post('/api/v1/uploads/presign', json=self.meta)
+        self.assertEqual(reply.json(), {'ok': True, 'storage_backend': 'local'})
+        self.assertEqual(db.one('SELECT COUNT(*) AS n FROM tasks')['n'], 0)
+        pdf = io.BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.write(pdf)
+        reply = self.client.post('/api/v1/tasks', data=self.meta,
+                                 files={'file': ('sample.pdf', pdf.getvalue(), 'application/pdf')})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        task = db.one('SELECT * FROM tasks WHERE id=?', (reply.json()['task_id'],))
+        self.assertEqual(task['status'], 'QUEUED')
+        self.assertEqual(Path(task['pdf_path']).read_bytes(), pdf.getvalue())
+        download = self.client.get(f"/api/agent/file/{task['id']}",
+                                  headers={'X-Agent-Token': db.get_conf('agent_token')})
+        self.assertEqual(download.content, pdf.getvalue())
+
+    def test_cos_upload_still_requires_completion(self):
+        with patch.object(config, 'STORAGE_BACKEND', 'cos'), patch.object(
+                server_web.storage, 'prepare_upload', return_value=('cos://uploads/test.pdf', 'https://example.invalid/upload')):
+            reply = self.client.post('/api/v1/uploads/presign', json=self.meta)
+        self.assertEqual(reply.status_code, 200, reply.text)
+        tid = reply.json()['task_id']
+        self.assertEqual(db.one('SELECT status FROM tasks WHERE id=?', (tid,))['status'], 'UPLOADING')
+        with patch.object(server_web.storage, 'exists', return_value=True):
+            self.assertEqual(self.client.post(f'/api/v1/uploads/{tid}/complete').status_code, 200)
+        self.assertEqual(db.one('SELECT status FROM tasks WHERE id=?', (tid,))['status'], 'QUEUED')
+
+    def test_logged_in_clients_can_cache_queue_but_only_one_can_claim(self):
+        pdf_path = self.uploads / 'queued.pdf'
+        pdf_path.write_bytes(b'queued-pdf')
+        tid = db.execute(
+            "INSERT INTO tasks(title,copies,pages,sheets,source_user,pdf_path,pdf_name,created_at) "
+            "VALUES('练习卷',1,1,1,'other-user',?,'queued.pdf',?)",
+            (str(pdf_path), time.time()))
+        client_a, client_b = str(uuid.uuid4()), str(uuid.uuid4())
+        self.assertEqual(self.client.get(f'/api/agent/file/{tid}').content, b'queued-pdf')
+        first = self.client.post(f'/api/v1/tasks/{tid}/claim', json={'client_id': client_a})
+        second = self.client.post(f'/api/v1/tasks/{tid}/claim', json={'client_id': client_b})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 409)
+        visible = next(task for task in self.client.get('/api/v1/bootstrap').json()['tasks']
+                       if task['id'] == tid)
+        self.assertTrue(visible['claimed'])
+        self.assertNotIn('claimed_client_id', visible)
+        waiting = self.client.post('/api/agent/sync', json={
+            'client_id': client_b, 'task_states': {str(tid): 'PRINTING'}})
+        self.assertEqual(waiting.status_code, 200)
+        self.assertEqual(db.one('SELECT status FROM tasks WHERE id=?', (tid,))['status'], 'QUEUED')
+        claimed = self.client.post('/api/agent/sync', json={
+            'client_id': client_a, 'task_states': {str(tid): 'PRINTING'}})
+        self.assertEqual(claimed.status_code, 200)
+        self.assertEqual(db.one('SELECT status FROM tasks WHERE id=?', (tid,))['status'], 'PRINTING')
+        self.assertEqual(self.client.get(f'/api/agent/file/{tid}').status_code, 403)
+
+    def test_retention_retries_failures_and_keeps_recent_objects(self):
+        now = time.time()
+        for location, age in [('cos://old', 40), ('cos://failed', 40), ('cos://recent', 1)]:
+            db.execute("INSERT INTO tasks(title,copies,pages,sheets,source_user,pdf_path,pdf_name,created_at) VALUES('test',1,1,1,'admin',?,'test.pdf',?)",
+                       (location, now - age * 86400))
+        old = self.uploads / '2000-01-01'
+        old.mkdir()
+        (old / 'test.pdf').write_bytes(b'test')
+        def remove(location):
+            if location == 'cos://failed':
+                raise RuntimeError('temporary storage error')
+        with patch.object(server_web.storage, 'remove', side_effect=remove) as mocked:
+            server_web.cleanup_old_uploads()
+        self.assertEqual([c.args[0] for c in mocked.call_args_list], ['cos://old', 'cos://failed'])
+        self.assertEqual([r['pdf_path'] for r in db.q('SELECT pdf_path FROM tasks ORDER BY id')],
+                         ['', 'cos://failed', 'cos://recent'])
+        self.assertFalse(old.exists())
+        with patch.object(server_web.storage, 'remove') as mocked:
+            server_web.cleanup_old_uploads()
+        mocked.assert_called_once_with('cos://failed')
+        self.assertEqual(db.one('SELECT COUNT(*) AS n FROM tasks')['n'], 3)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -10,6 +10,7 @@ poll() 统一返回: {"status": idle|printing|paper_out|jam|offline,
                  "page_counter": int(-1表示不可用), "detail": str}
 """
 import time
+from pathlib import Path
 
 from . import config
 
@@ -200,14 +201,34 @@ class CupsBackend(BackendBase):
 class WindowsBackend(BackendBase):
     name = "windows"
 
+    @staticmethod
+    def installed_printers():
+        import win32print
+        flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+        return [{"queue": row["pPrinterName"], "driver": row.get("pDriverName", ""),
+                 "port": row.get("pPortName", "")}
+                for row in win32print.EnumPrinters(flags, None, 2)]
+
     def submit(self, printer, pdf_path):
         import subprocess
+        if not Path(config.SUMATRA_PATH).is_file():
+            raise RuntimeError("缺少 PDF 打印组件 SumatraPDF.exe")
+        if printer["queue_name"] not in {item["queue"] for item in self.installed_printers()}:
+            raise RuntimeError("Windows 打印队列不存在，请先在系统中安装驱动并添加打印机")
         args = [config.SUMATRA_PATH, "-print-to", printer["queue_name"],
-                "-print-settings", "duplexlong,1copy", "-silent", str(pdf_path)]
-        subprocess.Popen(args)
+                "-print-settings", "duplexlong,monochrome,1x", "-silent", str(pdf_path)]
+        result = subprocess.run(args, timeout=300, check=False,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode:
+            raise RuntimeError(f"PDF 下发失败，打印组件返回代码 {result.returncode}")
         return f"win-{printer['id']}-{int(time.time())}"
 
     def poll(self, printer):
+        try:
+            if printer["queue_name"] not in {item["queue"] for item in self.installed_printers()}:
+                return {"status": "offline", "page_counter": -1, "detail": "Windows 队列不存在"}
+        except Exception as e:
+            return {"status": "offline", "page_counter": -1, "detail": str(e)}
         snmp = _snmp_status(printer.get("ip", ""))
         if snmp:
             return snmp

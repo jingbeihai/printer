@@ -7,6 +7,7 @@
   4. 维护页调度(每日测试页/闲置期周维护)
 现场按钮(故障/复位/加纸/改派/隔离)由 agent_web 调本类的动作方法。
 """
+import json
 import threading
 import time
 
@@ -23,6 +24,7 @@ class Executor:
         self.syncer = syncer              # CloudSync 实例,可空(纯本地模式)
         self._stop = threading.Event()
         self._thread = None
+        self._sync_thread = None
         self._idle_since: dict[int, float] = {}   # 打印机回 idle 的起始时刻(完成判定用)
         self._print_tick: dict[int, float] = {}   # 实际 PRINTING 时间采样点
 
@@ -40,8 +42,15 @@ class Executor:
             try:
                 now = time.time()
                 if self.syncer and now - last_sync >= config.SYNC_INTERVAL:
-                    self.syncer.tick()
-                    last_sync = now
+                    if config.MANUAL_PRINT:
+                        if self._sync_thread is None or not self._sync_thread.is_alive():
+                            self._sync_thread = threading.Thread(
+                                target=self.syncer.tick, daemon=True)
+                            self._sync_thread.start()
+                            last_sync = now
+                    else:
+                        self.syncer.tick()
+                        last_sync = now
                 self._step_all_printers()
                 self._release_finished_rests(now)
                 if config.in_print_window(time.strftime("%H:%M")):
@@ -233,6 +242,9 @@ class Executor:
             return
         idle = db.q("SELECT * FROM printers WHERE enabled=1 AND state=? "
                     "AND current_group IS NULL", (PS.IDLE.value,))
+        if config.MANUAL_PRINT:
+            allowed = set(json.loads(task["printer_ids"] or "[]"))
+            idle = [printer for printer in idle if printer["id"] in allowed]
         for p in idle:
             g = db.one("SELECT * FROM groups WHERE task_id=? AND status='QUEUED'"
                        " ORDER BY seq LIMIT 1", (task["id"],))
@@ -259,6 +271,8 @@ class Executor:
 
     # ---------------- 维护 ----------------
     def _maintenance_tick(self, now: float):
+        if config.MANUAL_PRINT:
+            return
         last = float(db.get_conf("last_maintenance", "0") or 0)
         if now - last < config.MAINTENANCE_INTERVAL_DAYS * 86400:
             return

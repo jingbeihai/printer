@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS users(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT UNIQUE NOT NULL,
   pw_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'teacher',   -- admin | teacher
+  role TEXT NOT NULL DEFAULT 'user',      -- superadmin | user
+  active INTEGER NOT NULL DEFAULT 1,
+  display_name TEXT NOT NULL DEFAULT '',
   profile_json TEXT NOT NULL DEFAULT '{}',-- 提交页表单记忆
   created_at REAL NOT NULL
 );
@@ -33,6 +35,8 @@ CREATE TABLE IF NOT EXISTS tasks(
   source_user TEXT NOT NULL,             -- 提交人账号
   priority INTEGER NOT NULL DEFAULT 0,   -- 管理员插队置顶用,越大越靠前
   status TEXT NOT NULL DEFAULT 'QUEUED', -- QUEUED/PRINTING/AWAITING_PICKUP/DONE/CANCELED
+  claimed_client_id TEXT NOT NULL DEFAULT '',
+  print_requested_at REAL NOT NULL DEFAULT 0,
   pdf_path TEXT NOT NULL, pdf_name TEXT NOT NULL,
   created_at REAL NOT NULL, started_at REAL, done_at REAL
 );
@@ -161,13 +165,34 @@ def init(path, schema):
             ):
                 if name not in existing:
                     _conn.execute(f"ALTER TABLE printers ADD COLUMN {name} {definition}")
-        if "tasks" in schema:
+            task_columns = {r["name"] for r in _conn.execute("PRAGMA table_info(local_tasks)")}
+            for name, definition in (
+                ("print_requested", "INTEGER NOT NULL DEFAULT 0"),
+                ("print_requested_at", "REAL NOT NULL DEFAULT 0"),
+                ("printer_ids", "TEXT NOT NULL DEFAULT '[]'"),
+            ):
+                if name not in task_columns:
+                    _conn.execute(f"ALTER TABLE local_tasks ADD COLUMN {name} {definition}")
+        if "CREATE TABLE IF NOT EXISTS tasks(" in schema:
             if _postgres:
+                _conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS active INTEGER NOT NULL DEFAULT 1")
+                _conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''")
                 _conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS copies_per_class INTEGER")
+                _conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claimed_client_id TEXT NOT NULL DEFAULT ''")
+                _conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS print_requested_at DOUBLE PRECISION NOT NULL DEFAULT 0")
             else:
+                user_columns = {r["name"] for r in _conn.execute("PRAGMA table_info(users)")}
+                if "active" not in user_columns:
+                    _conn.execute("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+                if "display_name" not in user_columns:
+                    _conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
                 existing = {r["name"] for r in _conn.execute("PRAGMA table_info(tasks)")}
                 if "copies_per_class" not in existing:
                     _conn.execute("ALTER TABLE tasks ADD COLUMN copies_per_class INTEGER")
+                if "claimed_client_id" not in existing:
+                    _conn.execute("ALTER TABLE tasks ADD COLUMN claimed_client_id TEXT NOT NULL DEFAULT ''")
+                if "print_requested_at" not in existing:
+                    _conn.execute("ALTER TABLE tasks ADD COLUMN print_requested_at REAL NOT NULL DEFAULT 0")
         # SQLite 专有维护语句；PostgreSQL 不支持 PRAGMA。
         if not _postgres:
             _conn.execute("PRAGMA optimize")
@@ -206,6 +231,13 @@ def execute(sql, args=()):
         cur = _conn.execute(query, args)
         _conn.commit()
         return getattr(cur, "lastrowid", None)
+
+
+def update_count(sql, args=()):
+    with _lock:
+        cur = _conn.execute(_pg_sql(sql) if _postgres else sql, args)
+        _conn.commit()
+        return cur.rowcount
 
 
 def log_event(type_, detail="", printer_id=None, group_id=None, task_id=None,
