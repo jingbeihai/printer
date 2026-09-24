@@ -202,7 +202,11 @@ def create_app() -> FastAPI:
         if error:
             return error
         tasks = [api_task(row) for row in db.q(
-            "SELECT * FROM tasks WHERE status<>'UPLOADING' ORDER BY priority DESC, id DESC")]
+            "SELECT * FROM tasks WHERE status<>'UPLOADING' ORDER BY "
+            "CASE WHEN status='QUEUED' AND claimed_client_id='' THEN 0 "
+            "WHEN status='QUEUED' THEN 1 "
+            "WHEN status IN ('PRINTING','AWAITING_PICKUP') THEN 2 ELSE 3 END, "
+            "priority DESC, id DESC")]
         now = time.time()
         day_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
         month_start = time.mktime(time.strptime(time.strftime("%Y-%m"), "%Y-%m"))
@@ -415,10 +419,32 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
         if task["source_user"] != user["username"] and user["role"] != ROLE_SUPERADMIN:
             return JSONResponse({"ok": False, "error": "只能取消自己提交的任务"}, status_code=403)
-        if task["status"] in (TaskStatus.DONE.value, TaskStatus.CANCELED.value):
-            return JSONResponse({"ok": False, "error": "该任务不能取消"}, status_code=400)
-        db.execute("UPDATE tasks SET status='CANCELED', done_at=? WHERE id=?", (time.time(), tid))
+        if task["status"] != TaskStatus.QUEUED.value or task["claimed_client_id"]:
+            return JSONResponse({"ok": False, "error": "任务已开始打印或结束，不能取消"}, status_code=409)
+        changed = db.update_count(
+            "UPDATE tasks SET status='CANCELED', done_at=? "
+            "WHERE id=? AND status='QUEUED' AND claimed_client_id=''", (time.time(), tid))
+        if not changed:
+            return JSONResponse({"ok": False, "error": "任务已被领取，请刷新列表"}, status_code=409)
         db.log_event("TASK_CANCELED", f"{user['username']} 取消任务", task_id=tid, table="task_events")
+        return api_snapshot(req)
+
+    @app.post("/api/v1/tasks/{tid}/move")
+    async def api_task_move(req: Request, tid: int):
+        user, error = api_user(req)
+        if error:
+            return error
+        body = await req.json()
+        direction = body.get("direction")
+        if direction not in ("up", "down"):
+            return JSONResponse({"ok": False, "error": "请选择上移或下移"}, status_code=400)
+        result = db.move_queued_task(tid, direction)
+        if result == "not_queued":
+            return JSONResponse({"ok": False, "error": "只能调整未开始的排队任务"}, status_code=409)
+        if result == "boundary":
+            return JSONResponse({"ok": False, "error": "任务已在队列边界"}, status_code=409)
+        db.log_event("TASK_MOVED", f"{user['username']} 将任务{'上移' if direction == 'up' else '下移'}",
+                     task_id=tid, table="task_events")
         return api_snapshot(req)
 
     @app.post("/api/v1/tasks/{tid}/claim")

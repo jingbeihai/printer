@@ -50,6 +50,9 @@ export const saveSchool=(id:number|null,input:Omit<Preset,"id">)=>request(
   });
 export const deleteSchool=(id:number)=>request(`/api/v1/schools/${id}`,{method:"DELETE"});
 export const cancelTask=(id:number)=>request(`/api/v1/tasks/${id}/cancel`,{method:"POST"});
+export const moveTask=(id:number,direction:"up"|"down")=>request(`/api/v1/tasks/${id}/move`,{
+  method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({direction}),
+});
 export type ManagedUser={id:number;username:string;role:"user"|"superadmin";active:number;display_name:string;created_at:number};
 export type AdminOverview={ok:boolean;error?:string;users:ManagedUser[];schools:Preset[];invite_code:string};
 async function adminRequest(path:string,init?:RequestInit):Promise<AdminOverview>{

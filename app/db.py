@@ -240,6 +240,42 @@ def update_count(sql, args=()):
         return cur.rowcount
 
 
+def move_queued_task(task_id: int, direction: str) -> str:
+    """Move an unclaimed queued task by one place, atomically for both databases."""
+    if direction not in ("up", "down"):
+        return "invalid"
+    with _lock:
+        try:
+            if _postgres:
+                # Serialize queue edits across server workers as well as threads.
+                _conn.execute("SELECT pg_advisory_xact_lock(8011)")
+            rows = _conn.execute(
+                "SELECT id FROM tasks WHERE status='QUEUED' AND claimed_client_id='' "
+                "ORDER BY priority DESC, id DESC" + (" FOR UPDATE" if _postgres else "")
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if task_id not in ids:
+                result = "not_queued"
+            else:
+                index = ids.index(task_id)
+                neighbor = index + (-1 if direction == "up" else 1)
+                if neighbor < 0 or neighbor >= len(ids):
+                    result = "boundary"
+                else:
+                    ids[index], ids[neighbor] = ids[neighbor], ids[index]
+                    for rank, tid in enumerate(ids):
+                        _conn.execute(
+                            "UPDATE tasks SET priority=" + ("%s" if _postgres else "?") +
+                            " WHERE id=" + ("%s" if _postgres else "?"),
+                            (len(ids) - rank, tid))
+                    result = "moved"
+            _conn.commit()
+            return result
+        except Exception:
+            _conn.rollback()
+            raise
+
+
 def log_event(type_, detail="", printer_id=None, group_id=None, task_id=None,
               table="events"):
     if table == "events":
