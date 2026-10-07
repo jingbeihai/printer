@@ -12,11 +12,13 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, Form, Request, Response, UploadFile
 from fastapi.responses import (HTMLResponse, JSONResponse,
                                PlainTextResponse, RedirectResponse)
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from . import config, db, importer, storage
 from .compose import sheets_per_copy
@@ -543,6 +545,29 @@ def create_app() -> FastAPI:
         return {"ok": True, "task_id": tid, "upload_url": upload_url,
                 "expires_in": config.COS_PRESIGN_SECONDS}
 
+    @app.post("/api/v1/uploads/{tid}/file")
+    async def api_upload_file(req: Request, tid: int):
+        """浏览器无法直传时，同源中转到原 COS 对象，完成后仍需确认入队。"""
+        user, error = api_user(req)
+        if error:
+            return error
+        task = db.one("SELECT * FROM tasks WHERE id=?", (tid,))
+        if not task or task["source_user"] != user["username"]:
+            return JSONResponse({"ok": False, "error": "上传任务不存在"}, status_code=404)
+        if task["status"] != "UPLOADING" or not task["pdf_path"].startswith("cos://"):
+            return JSONResponse({"ok": False, "error": "上传任务状态无效"}, status_code=409)
+        async with req.form() as form:
+            upload = form.get("file")
+            if not getattr(upload, "filename", "").lower().endswith(".pdf"):
+                return JSONResponse({"ok": False, "error": "请选择 PDF 文件"}, status_code=400)
+            if not upload.size or upload.size > 200 * 1024 ** 2:
+                return JSONResponse({"ok": False, "error": "中转上传支持 200 MB 以内的文件，大文件请配置 COS 直传"}, status_code=413)
+            try:
+                await run_in_threadpool(storage.upload_stream, task["pdf_path"], upload.file)
+            except Exception:
+                return JSONResponse({"ok": False, "error": "服务器中转上传失败，请检查服务器的 COS 连接和写入权限"}, status_code=502)
+        return {"ok": True, "task_id": tid}
+
     @app.post("/api/v1/uploads/{tid}/complete")
     def api_upload_complete(req: Request, tid: int):
         """浏览器直传完成后核实对象存在，再把任务放入打印队列。"""
@@ -885,11 +910,11 @@ def create_app() -> FastAPI:
             if not legacy_agent and t["claimed_client_id"] != client_id:
                 continue
             if st in (TaskStatus.PRINTING.value, TaskStatus.AWAITING_PICKUP.value,
-                      TaskStatus.DONE.value):
+                      TaskStatus.DONE.value, TaskStatus.CANCELED.value):
                 fields = {"status": st}
                 if st == TaskStatus.PRINTING.value and not t["started_at"]:
                     fields["started_at"] = now
-                if st == TaskStatus.DONE.value:
+                if st in (TaskStatus.DONE.value, TaskStatus.CANCELED.value):
                     fields["done_at"] = now
                 sets = ",".join(f"{k}=?" for k in fields)
                 db.execute(f"UPDATE tasks SET {sets} WHERE id=?",
@@ -932,7 +957,7 @@ def create_app() -> FastAPI:
         except (OSError, RuntimeError):
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
         return Response(content=content, media_type="application/pdf",
-                        headers={"Content-Disposition": f'attachment; filename="{t["pdf_name"]}"'})
+                        headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(t["pdf_name"], safe="")})
 
     # 当前可交互原型的静态构建产物。它必须在所有 API 路由之后挂载，避免吞掉 /api。
     desk_dir = Path(__file__).parent / "static" / "desk"

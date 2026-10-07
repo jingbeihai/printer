@@ -78,7 +78,8 @@ async function accountRequest(init?:RequestInit):Promise<{ok:boolean;error?:stri
 }
 export const loadAccount=()=>accountRequest();
 export const updateAccount=(value:{display_name:string;old_password?:string;new_password?:string})=>accountRequest({method:"PUT",...jsonBody(value)});
-type LocalReply={ok:boolean;error?:string;printers?:{queue:string;driver:string;port:string}[]};
+export type FleetTask={id:number;title:string;status:string;paused:boolean;printer_ids:number[];active_printer_ids:number[];completed_groups:number;total_groups:number};
+type LocalReply={ok:boolean;error?:string;message?:string;tasks?:FleetTask[];printers?:{queue:string;driver:string;port:string}[]};
 async function localRequest(path:string,init?:RequestInit):Promise<LocalReply>{
   const response=await fetch(path,{credentials:"include",...init});
   let body:LocalReply;
@@ -90,6 +91,9 @@ async function localRequest(path:string,init?:RequestInit):Promise<LocalReply>{
 const jsonPost=(body:unknown):RequestInit=>({method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 export const installedPrinters=async()=> (await localRequest("/desktop/printers/available")).printers||[];
 export const addPrinter=(input:{name:string;queue:string;ip:string})=>localRequest("/desktop/printers",jsonPost(input));
+export const deletePrinter=(id:number)=>localRequest(`/desktop/printers/${id}`,{method:"DELETE"});
+export const loadFleet=async()=> (await localRequest('/desktop/fleet')).tasks||[];
+export const controlFleetTask=(id:number,action:'pause'|'resume'|'cancel'|'up'|'down',printer_id?:number)=>localRequest(`/desktop/tasks/${id}/control`,jsonPost({action,printer_id}));
 export const printTask=(id:number,printerIds:number[])=>localRequest(`/desktop/tasks/${id}/print`,jsonPost({printer_ids:printerIds}));
 export const confirmPickup=(id:number)=>localRequest(`/desktop/tasks/${id}/pickup`,{method:"POST"});
 type UploadReply={ok:boolean;task_id?:number;storage_backend?:"local";upload_url?:string;error?:string};
@@ -106,7 +110,7 @@ function putToCos(url:string,file:File,onProgress?:(percent:number)=>void){
     xhr.setRequestHeader("Content-Type","application/pdf");
     xhr.upload.onprogress=event=>{if(event.lengthComputable)onProgress?.(Math.round(event.loaded/event.total*100))};
     xhr.onload=()=>xhr.status>=200&&xhr.status<300?resolve():reject(new Error(`COS 上传失败（HTTP ${xhr.status}）`));
-    xhr.onerror=()=>reject(new Error("无法直连腾讯云 COS，请检查存储桶跨域 CORS 设置"));
+    xhr.onerror=()=>reject(new Error("无法直连文件存储，可能是网络或跨域设置问题"));
     xhr.ontimeout=()=>reject(new Error("COS 上传超时，请检查网络后重试"));
     xhr.send(file);
   });
@@ -132,7 +136,16 @@ export const uploadTask=async (
   }
   if(!prepared.upload_url||!prepared.task_id)throw new Error("云端未返回 COS 上传地址");
   try{
-    await putToCos(prepared.upload_url,input.file,onProgress);
+    try{
+      await putToCos(prepared.upload_url,input.file,onProgress);
+    }catch{
+      // Reuse the reserved task and object, even if COS accepted the PUT but
+      // the browser could not read its response. Never create a second task.
+      onProgress?.(0);
+      const form=new FormData();form.set("file",input.file);
+      await uploadRequest(`/api/v1/uploads/${prepared.task_id}/file`,{method:"POST",body:form});
+    }
+    onProgress?.(100);
     return await uploadRequest(`/api/v1/uploads/${prepared.task_id}/complete`,{method:"POST"});
   }catch(error){
     void fetch(apiBase+`/api/v1/uploads/${prepared.task_id}`,{method:"DELETE",credentials:"include"}).catch(()=>{});

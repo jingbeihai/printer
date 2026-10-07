@@ -57,9 +57,55 @@ class StationRuntimeTests(unittest.TestCase):
         db.execute("INSERT INTO local_tasks(cloud_id,title,meta_json,copies,pages,pdf_path,status,priority,created_at) "
                    "VALUES(42,'等待打印','{}',1,1,'second.pdf','QUEUED',0,?)", (time.time(),))
         self.station.request_print({'id': 42}, [printer_id])
-        self.assertEqual(self.station.pending_print_ids(), [42])
-        with self.assertRaisesRegex(ValueError, '已加入本机打印队列'):
+        self.assertEqual(self.station.pending_print_ids(), [])
+        self.assertEqual(db.one("SELECT status FROM local_tasks WHERE cloud_id=42")['status'], 'PRINTING')
+        with self.assertRaisesRegex(ValueError, '不能重复打印'):
             self.station.request_print({'id': 42}, [printer_id])
+
+    def test_remove_printer_keeps_history_and_can_rebind(self):
+        pid = db.execute("INSERT INTO printers(name,queue_name,state) VALUES('old','queue','OFFLINE')")
+        self.station.delete_printer(pid)
+        self.assertEqual(self.station.snapshot(), [])
+        self.assertEqual(db.one('SELECT enabled FROM printers WHERE id=?', (pid,))['enabled'], 0)
+        with patch.object(self.station, 'available_printers', return_value=[{'queue': 'queue'}]):
+            self.assertEqual(self.station.add_printer('new', 'queue'), pid)
+
+    def test_remove_printer_rejects_pending_work(self):
+        pid = db.execute("INSERT INTO printers(name,queue_name,state) VALUES('busy','queue','IDLE')")
+        db.execute("INSERT INTO local_tasks(cloud_id,title,copies,pages,pdf_path,status,created_at,print_requested,printer_ids) "
+                   "VALUES(99,'test',1,1,'test.pdf','PRINTING',0,1,?)", (json.dumps([pid]),))
+        with self.assertRaisesRegex(ValueError, '未完成任务'):
+            self.station.delete_printer(pid)
+
+    def test_different_tasks_dispatch_to_different_printers(self):
+        from app.executor import Executor
+        backend = Mock()
+        backend.submit.return_value = 'test-job'
+        for i in [1, 2]:
+            pid = db.execute("INSERT INTO printers(name,queue_name,state) VALUES(?,?,'IDLE')", (str(i), str(i)))
+            tid = db.execute("INSERT INTO local_tasks(cloud_id,title,copies,pages,pdf_path,status,created_at,print_requested,printer_ids) "
+                             "VALUES(?,'test',1,1,'test.pdf','QUEUED',0,1,?)", (i, json.dumps([pid])))
+            db.execute("INSERT INTO groups(task_id,seq,label,pdf_path,pages,copies,sheets,composed_path) "
+                       "VALUES(?,1,'g','test.pdf',1,1,1,?)", (tid, str(i)+'.pdf'))
+        executor = Executor(backend=backend)
+        executor._assign()
+        self.assertEqual(backend.submit.call_count, 2)
+        self.assertEqual(db.one("SELECT COUNT(*) n FROM groups WHERE status='PRINTING'")['n'], 2)
+        executor._assign()
+        self.assertEqual(backend.submit.call_count, 2)
+
+    def test_stuck_task_does_not_block_other_printer(self):
+        from app.executor import Executor
+        backend = Mock()
+        for i, state in [(1, 'OFFLINE'), (2, 'IDLE')]:
+            pid = db.execute("INSERT INTO printers(name,queue_name,state) VALUES(?,?,?)", (str(i), str(i), state))
+            tid = db.execute("INSERT INTO local_tasks(cloud_id,title,copies,pages,pdf_path,status,created_at,print_requested,printer_ids) "
+                             "VALUES(?,'test',1,1,'test.pdf','PRINTING',0,1,?)", (i, json.dumps([pid])))
+            db.execute("INSERT INTO groups(task_id,seq,label,pdf_path,pages,copies,sheets,composed_path) "
+                       "VALUES(?,1,'g','test.pdf',1,1,1,'ready.pdf')", (tid,))
+        Executor(backend=backend)._assign()
+        backend.submit.assert_called_once()
+        self.assertEqual(backend.submit.call_args.args[0]['id'], 2)
 
     def test_login_caches_every_queued_pdf_without_starting_print(self):
         cache = Path(self.temporary.name) / 'uploads'
@@ -78,6 +124,59 @@ class StationRuntimeTests(unittest.TestCase):
         self.assertEqual(sync.last_error, '')
         self.assertEqual(len(list((cache / 'queue').glob('*.pdf'))), 2)
         self.assertEqual(db.one('SELECT COUNT(*) n FROM local_tasks')['n'], 0)
+
+    def prepare_control_task(self):
+        from app.executor import Executor
+        backend = Mock()
+        backend.control_group.return_value = 1
+        self.station.executor = Executor(backend=backend)
+        pid = db.execute("INSERT INTO printers(name,queue_name,state) VALUES('control','queue','PRINTING')")
+        tid = db.execute("INSERT INTO local_tasks(cloud_id,title,copies,pages,pdf_path,status,created_at,print_requested,printer_ids) "
+                         "VALUES(50,'task',1,1,'test.pdf','PRINTING',0,1,?)", (json.dumps([pid]),))
+        gid = db.execute("INSERT INTO groups(task_id,seq,label,pdf_path,pages,copies,sheets,composed_path,status,printer_id) "
+                         "VALUES(?,1,'g','test.pdf',1,1,1,'composed.pdf','PRINTING',?)", (tid,pid))
+        db.execute('UPDATE printers SET current_group=? WHERE id=?', (gid,pid))
+        return pid, tid, gid, backend
+
+    def test_pause_prevents_completion_and_resume_releases(self):
+        pid,tid,gid,backend = self.prepare_control_task()
+        self.station.control_task(50,'pause')
+        self.assertEqual(db.one('SELECT paused FROM local_tasks WHERE id=?',(tid,))['paused'],1)
+        self.station.executor._step_printer(dict(db.one('SELECT * FROM printers WHERE id=?',(pid,))), {'status':'idle'})
+        self.assertEqual(db.one('SELECT status FROM groups WHERE id=?',(gid,))['status'],'PRINTING')
+        self.assertTrue(self.station.fleet_tasks()[0]['paused'])
+        self.station.control_task(50,'resume')
+        self.assertEqual(db.one('SELECT paused FROM local_tasks WHERE id=?',(tid,))['paused'],0)
+        self.assertEqual([c.args[2] for c in backend.control_group.call_args_list],['pause','resume'])
+
+    def test_cancel_only_target_task_and_releases_printer(self):
+        pid,tid,gid,backend = self.prepare_control_task()
+        self.station.control_task(50,'cancel')
+        self.assertEqual(db.one('SELECT status FROM local_tasks WHERE id=?',(tid,))['status'],'CANCELED')
+        self.assertIsNone(db.one('SELECT current_group FROM printers WHERE id=?',(pid,))['current_group'])
+        self.assertEqual(self.station.fleet_tasks(),[])
+        backend.control_group.assert_called_once()
+
+    def test_driver_error_stops_dispatch_without_claiming_cancel_success(self):
+        pid,tid,gid,backend = self.prepare_control_task()
+        backend.control_group.side_effect = RuntimeError('access denied')
+        with self.assertRaisesRegex(RuntimeError,'控制失败'):
+            self.station.control_task(50,'cancel')
+        task = db.one('SELECT * FROM local_tasks WHERE id=?',(tid,))
+        self.assertEqual(task['status'],'PRINTING')
+        self.assertEqual(task['paused'],1)
+        self.assertEqual(db.one('SELECT current_group FROM printers WHERE id=?',(pid,))['current_group'],gid)
+
+    def test_waiting_order_can_move_with_equal_timestamps(self):
+        from app.executor import Executor
+        self.station.executor = Executor(backend=Mock())
+        for cid in [51,52,53]:
+            db.execute("INSERT INTO local_tasks(cloud_id,title,copies,pages,pdf_path,status,created_at,print_requested,printer_ids) "
+                       "VALUES(?,'test',1,1,'test.pdf','PRINTING',0,1,'[1]')",(cid,))
+        self.station.control_task(52,'up',1)
+        self.assertEqual([t['id'] for t in self.station.fleet_tasks()],[52,51,53])
+        self.station.control_task(52,'down',1)
+        self.assertEqual([t['id'] for t in self.station.fleet_tasks()],[51,52,53])
 
 
 if __name__ == '__main__':

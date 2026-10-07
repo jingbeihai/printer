@@ -167,6 +167,7 @@ def init(path, schema):
                     _conn.execute(f"ALTER TABLE printers ADD COLUMN {name} {definition}")
             task_columns = {r["name"] for r in _conn.execute("PRAGMA table_info(local_tasks)")}
             for name, definition in (
+                ("paused", "INTEGER NOT NULL DEFAULT 0"),
                 ("print_requested", "INTEGER NOT NULL DEFAULT 0"),
                 ("print_requested_at", "REAL NOT NULL DEFAULT 0"),
                 ("printer_ids", "TEXT NOT NULL DEFAULT '[]'"),

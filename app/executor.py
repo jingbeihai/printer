@@ -22,6 +22,7 @@ class Executor:
     def __init__(self, backend=None, syncer=None):
         self.backend = backend or get_backend()
         self.syncer = syncer              # CloudSync 实例,可空(纯本地模式)
+        self.control_lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
         self._sync_thread = None
@@ -51,11 +52,12 @@ class Executor:
                     else:
                         self.syncer.tick()
                         last_sync = now
-                self._step_all_printers()
-                self._release_finished_rests(now)
-                if config.in_print_window(time.strftime("%H:%M")):
-                    self._assign()
-                self._maintenance_tick(now)
+                with self.control_lock:
+                    self._step_all_printers()
+                    self._release_finished_rests(now)
+                    if config.in_print_window(time.strftime("%H:%M")):
+                        self._assign()
+                    self._maintenance_tick(now)
             except Exception as e:  # noqa: BLE001 - 调度循环永不因单次异常退出
                 db.log_event("EXECUTOR_ERROR", repr(e))
             self._stop.wait(config.POLL_INTERVAL)
@@ -72,6 +74,10 @@ class Executor:
             self._step_printer(p, info)
 
     def _step_printer(self, p: dict, info: dict):
+        if p['current_group']:
+            task = db.one("SELECT t.paused,t.status FROM local_tasks t JOIN groups g ON g.task_id=t.id WHERE g.id=?", (p['current_group'],))
+            if task and (task['paused'] or task['status'] == 'CANCELED'):
+                return
         st = info["status"]
         pid = p["id"]
         old = p["state"]
@@ -234,12 +240,21 @@ class Executor:
 
     # ---------------- 派单 ----------------
     def _assign(self):
+        if config.MANUAL_PRINT:
+            importer.maybe_release_next_task()
+            for task in db.q("SELECT * FROM local_tasks WHERE status='PRINTING' AND print_requested=1 AND paused=0 "
+                             "ORDER BY print_requested_at, id"):
+                self._assign_task(task)
+            return
         task = importer.current_active_task()
         if not task:
             importer.maybe_release_next_task()
             task = importer.current_active_task()
         if not task:
             return
+        self._assign_task(task)
+
+    def _assign_task(self, task):
         idle = db.q("SELECT * FROM printers WHERE enabled=1 AND state=? "
                     "AND current_group IS NULL", (PS.IDLE.value,))
         if config.MANUAL_PRINT:

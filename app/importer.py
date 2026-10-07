@@ -75,6 +75,11 @@ def current_active_task():
 
 def maybe_release_next_task():
     """无活动任务时,把队首任务(优先级高者先,同优先级按云端ID)置为 PRINTING。"""
+    if config.MANUAL_PRINT:
+        for task in db.q("SELECT id,title FROM local_tasks WHERE status='QUEUED' AND print_requested=1"):
+            db.execute("UPDATE local_tasks SET status='PRINTING' WHERE id=?", (task['id'],))
+            db.log_event("TASK_STARTED", f"任务《{task['title']}》已启用打印", task_id=task['id'])
+        return
     if current_active_task():
         return
     if config.MANUAL_PRINT:

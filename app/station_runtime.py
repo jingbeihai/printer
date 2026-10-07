@@ -102,6 +102,69 @@ class StationRuntime:
     def available_printers(self):
         return WindowsBackend.installed_printers()
 
+    def fleet_tasks(self):
+        if not self.enabled:
+            return []
+        result = []
+        for task in db.q("SELECT * FROM local_tasks WHERE print_requested=1 AND status NOT IN ('DONE','CANCELED') ORDER BY print_requested_at,id"):
+            groups = db.q("SELECT printer_id,status FROM groups WHERE task_id=?", (task['id'],))
+            result.append({'id': task['cloud_id'], 'title': task['title'],
+                           'status': task['status'], 'paused': bool(task['paused']),
+                           'printer_ids': json.loads(task['printer_ids']),
+                           'active_printer_ids': [g['printer_id'] for g in groups if g['status']=='PRINTING'],
+                           'completed_groups': sum(g['status']=='DONE' for g in groups),
+                           'total_groups': len(groups)})
+        return result
+
+    def control_task(self, cloud_id, action, printer_id=None):
+        if action not in ('pause', 'resume', 'cancel', 'up', 'down'):
+            raise ValueError("不支持的任务操作")
+        with self.print_lock, self.executor.control_lock:
+            task = db.one("SELECT * FROM local_tasks WHERE cloud_id=? AND print_requested=1", (cloud_id,))
+            if not task or task['status'] in ('DONE','CANCELED'):
+                raise ValueError("本机任务不存在或已结束")
+            active = db.q("SELECT * FROM groups WHERE task_id=? AND status='PRINTING'", (task['id'],))
+            if action in ('up','down'):
+                waiting = [t for t in self.fleet_tasks() if printer_id in t['printer_ids']
+                           and not t['active_printer_ids'] and t['status'] != 'AWAITING_PICKUP']
+                ids = [t['id'] for t in waiting]
+                if cloud_id not in ids:
+                    raise ValueError("只能调整等待任务")
+                index = ids.index(cloud_id); target = index + (-1 if action=='up' else 1)
+                if target < 0 or target >= len(ids):
+                    raise ValueError("任务已在列表边界")
+                ids[index], ids[target] = ids[target], ids[index]
+                ordered = [t['id'] for t in self.fleet_tasks()]
+                first, second = ordered.index(ids[index]), ordered.index(ids[target])
+                ordered[first], ordered[second] = ordered[second], ordered[first]
+                for position, cid in enumerate(ordered, 1):
+                    db.execute('UPDATE local_tasks SET print_requested_at=? WHERE cloud_id=?', (position,cid))
+                return
+            if task['status']=='AWAITING_PICKUP' and action!='cancel':
+                raise ValueError("该任务已打印完成，请确认收纸")
+            # Stop dispatch first, including when a driver rejects the control.
+            db.execute('UPDATE local_tasks SET paused=1 WHERE id=?', (task['id'],))
+            matched = 0
+            for group in active:
+                printer = dict(db.one('SELECT * FROM printers WHERE id=?', (group['printer_id'],)))
+                try:
+                    matched += self.executor.backend.control_group(printer, group['composed_path'], action)
+                except Exception as exc:
+                    raise RuntimeError(f'后续下发已暂停，但 Windows 作业控制失败：{exc}') from exc
+            if action=='cancel':
+                db.execute("UPDATE local_tasks SET status='CANCELED',done_at=? WHERE id=?", (time.time(),task['id']))
+                db.execute("UPDATE groups SET status='PAUSED' WHERE task_id=? AND status!='DONE'", (task['id'],))
+                for group in active:
+                    db.execute("UPDATE printers SET current_group=NULL,state='IDLE' WHERE id=?", (group['printer_id'],))
+                    self.executor._idle_since.pop(group['printer_id'], None)
+                    self.executor._close_run_session(group['printer_id'], -1, 'task_canceled')
+            elif action=='resume':
+                db.execute('UPDATE local_tasks SET paused=0 WHERE id=?', (task['id'],))
+                for group in active:
+                    self.executor._idle_since.pop(group['printer_id'], None)
+            db.log_event('TASK_CONTROL', action, task_id=task['id'])
+            return ('已停止后续下发；已进入打印机缓存的页面可能继续出纸' if action!='resume' and active and not matched else '')
+
     def add_printer(self, name: str, queue: str, ip: str = ""):
         if not self.enabled:
             raise ValueError("请先启用本机打印站")
@@ -109,12 +172,30 @@ class StationRuntime:
         if queue not in installed:
             raise ValueError("Windows 中找不到该打印机，请先安装驱动并添加打印机")
         name = name.strip() or queue
-        if db.one("SELECT id FROM printers WHERE name=? OR queue_name=?", (name, queue)):
+        existing = db.one("SELECT * FROM printers WHERE name=? OR queue_name=?", (name, queue))
+        if existing and existing['enabled']:
             raise ValueError("这台打印机已添加")
+        if existing:
+            db.execute("UPDATE printers SET name=?,queue_name=?,ip=?,enabled=1,state='OFFLINE' WHERE id=?",
+                       (name, queue, ip.strip(), existing['id']))
+            return existing['id']
         pid = db.execute("INSERT INTO printers(name,ip,queue_name,state) VALUES(?,?,?,?)",
                          (name, ip.strip(), queue, PrinterState.OFFLINE.value))
         db.log_event("PRINTER_ADDED", f"已绑定 Windows 队列：{queue}", printer_id=pid)
         return pid
+
+    def delete_printer(self, pid: int):
+        with self.print_lock:
+            printer = db.one("SELECT * FROM printers WHERE id=? AND enabled=1", (pid,))
+            if not printer:
+                raise ValueError("打印机不存在")
+            if printer['current_group'] or printer['state'] == 'PRINTING':
+                raise ValueError("打印机正在执行任务，请先取消或完成任务")
+            for task in db.q("SELECT printer_ids FROM local_tasks WHERE print_requested=1 AND status IN ('QUEUED','PRINTING')"):
+                if pid in json.loads(task['printer_ids'] or '[]'):
+                    raise ValueError("打印机仍有未完成任务，请先取消或完成任务")
+            db.execute("UPDATE printers SET enabled=0 WHERE id=?", (pid,))
+            db.log_event("PRINTER_REMOVED", f"已移除打印机：{printer['name']}", printer_id=pid)
 
     def request_print(self, cloud_task: dict, printer_ids: list[int]):
         with self.print_lock:
@@ -132,8 +213,8 @@ class StationRuntime:
                       db.q("SELECT id,state FROM printers WHERE enabled=1")}
         if not chosen <= configured.keys():
             raise ValueError("所选打印机未在本机配置")
-        if any(configured[pid] != PrinterState.IDLE.value for pid in chosen):
-            raise ValueError("请选择空闲且已连接的打印机")
+        if any(configured[pid] not in (PrinterState.IDLE.value, PrinterState.PRINTING.value) for pid in chosen):
+            raise ValueError("请选择已连接且可用的打印机")
         task = db.one("SELECT * FROM local_tasks WHERE cloud_id=?", (cloud_id,))
         if task and task["status"] != "QUEUED":
             raise ValueError("该任务已经开始或结束，不能重复打印")

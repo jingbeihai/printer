@@ -201,6 +201,26 @@ class CupsBackend(BackendBase):
 class WindowsBackend(BackendBase):
     name = "windows"
 
+    def control_group(self, printer, pdf_path, action):
+        """只操作本程序对应文件的作业，不清空其他应用的打印作业。"""
+        import win32print
+        from pathlib import PureWindowsPath
+        expected = PureWindowsPath(pdf_path).name.casefold()
+        handle = win32print.OpenPrinter(printer['queue_name'])
+        try:
+            jobs = win32print.EnumJobs(handle, 0, 9999, 1)
+            matched = [job for job in jobs if PureWindowsPath(job.get('pDocument') or '').name.casefold() == expected]
+            if jobs and not matched:
+                raise RuntimeError("Windows 队列中无法准确识别此任务，请在系统打印队列中操作")
+            command = {'pause': win32print.JOB_CONTROL_PAUSE,
+                       'resume': win32print.JOB_CONTROL_RESUME,
+                       'cancel': win32print.JOB_CONTROL_DELETE}[action]
+            for job in matched:
+                win32print.SetJob(handle, job['JobId'], 0, None, command)
+            return len(matched)
+        finally:
+            win32print.ClosePrinter(handle)
+
     @staticmethod
     def installed_printers():
         import win32print
@@ -236,6 +256,7 @@ class WindowsBackend(BackendBase):
             import win32print
             h = win32print.OpenPrinter(printer["queue_name"])
             info = win32print.GetPrinter(h, 2)
+            jobs = win32print.EnumJobs(h, 0, 9999, 1)
             win32print.ClosePrinter(h)
             status = info["Status"]
             if status & 0x00000020:
@@ -244,6 +265,8 @@ class WindowsBackend(BackendBase):
                 st = "jam"
             elif status & 0x00000400 or status & 0x00000002:
                 st = "offline"
+            elif jobs:
+                st = "printing"
             else:
                 st = "idle"
             return {"status": st, "page_counter": -1, "detail": f"win32 status={status}"}

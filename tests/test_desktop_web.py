@@ -84,6 +84,18 @@ class DesktopGatewayTests(unittest.TestCase):
         self.assertEqual(result.status_code, 403)
         request.assert_not_called()
 
+    def test_delete_printer_requires_login_and_calls_station(self):
+        station = Mock()
+        with TestClient(create_desktop_app('https://cloud.example', station),
+                        base_url='http://127.0.0.1:18765') as client:
+            with patch('app.desktop_web.requests.Session.request', return_value=reply(401)):
+                self.assertEqual(client.delete('/desktop/printers/5').status_code, 401)
+                station.delete_printer.assert_not_called()
+            client.cookies.set('pc_session', 'cloud-session')
+            with patch('app.desktop_web.requests.Session.request', return_value=reply(body=b'{"ok":true,"tasks":[]}')):
+                self.assertEqual(client.delete('/desktop/printers/5').json(), {'ok': True})
+                station.delete_printer.assert_called_once_with(5)
+
     def test_formal_login_has_no_preview_entry(self):
         result = self.client.get('/login')
         self.assertEqual(result.status_code, 200)

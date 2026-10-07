@@ -50,6 +50,24 @@ class UploadRegressionTests(unittest.TestCase):
                                   headers={'X-Agent-Token': db.get_conf('agent_token')})
         self.assertEqual(download.content, pdf.getvalue())
 
+    def test_download_encodes_unicode_and_special_filename_characters(self):
+        from urllib.parse import unquote
+        pdf_path = self.uploads / 'download.pdf'
+        pdf_path.write_bytes(b'pdf-content')
+        for filename in ['数学练习卷.pdf', '考试 "A" 100% #1.pdf', 'line\r\nbreak.pdf']:
+            with self.subTest(filename=filename):
+                tid = db.execute(
+                    "INSERT INTO tasks(title,copies,pages,sheets,source_user,pdf_path,pdf_name,created_at) "
+                    "VALUES('test',1,1,1,'admin',?,?,?)", (str(pdf_path), filename, time.time()))
+                reply = self.client.get(f'/api/agent/file/{tid}')
+                self.assertEqual(reply.status_code, 200)
+                self.assertEqual(reply.content, b'pdf-content')
+                header = reply.headers['content-disposition']
+                self.assertTrue(header.isascii())
+                self.assertNotIn('\r', header)
+                self.assertNotIn('\n', header)
+                self.assertEqual(unquote(header.split("UTF-8''", 1)[1]), filename)
+
     def test_cos_upload_still_requires_completion(self):
         with patch.object(config, 'STORAGE_BACKEND', 'cos'), patch.object(
                 server_web.storage, 'prepare_upload', return_value=('cos://uploads/test.pdf', 'https://example.invalid/upload')):
@@ -60,6 +78,35 @@ class UploadRegressionTests(unittest.TestCase):
         with patch.object(server_web.storage, 'exists', return_value=True):
             self.assertEqual(self.client.post(f'/api/v1/uploads/{tid}/complete').status_code, 200)
         self.assertEqual(db.one('SELECT status FROM tasks WHERE id=?', (tid,))['status'], 'QUEUED')
+
+    def test_cos_proxy_reuses_object_and_requires_completion(self):
+        with patch.object(config, 'STORAGE_BACKEND', 'cos'), patch.object(
+                server_web.storage, 'prepare_upload', return_value=('cos://uploads/original.pdf', 'https://example.invalid/upload')):
+            tid = self.client.post('/api/v1/uploads/presign', json=self.meta).json()['task_id']
+        def receive(location, stream):
+            self.assertEqual(location, 'cos://uploads/original.pdf')
+            self.assertEqual(stream.read(), b'pdf-data')
+        with patch.object(server_web.storage, 'upload_stream', side_effect=receive) as upload:
+            reply = self.client.post(f'/api/v1/uploads/{tid}/file', files={'file': ('sample.pdf', b'pdf-data')})
+            self.assertEqual(reply.status_code, 200, reply.text)
+            upload.assert_called_once()
+        self.assertEqual(db.one('SELECT COUNT(*) AS n FROM tasks')['n'], 1)
+        self.assertEqual(db.one('SELECT status FROM tasks WHERE id=?', (tid,))['status'], 'UPLOADING')
+        with patch.object(server_web.storage, 'exists', return_value=True):
+            self.assertEqual(self.client.post(f'/api/v1/uploads/{tid}/complete').status_code, 200)
+        self.assertEqual(self.client.post(f'/api/v1/uploads/{tid}/file').status_code, 409)
+
+    def test_cos_proxy_rejects_other_owner_and_reports_storage_failure(self):
+        tid = db.execute("INSERT INTO tasks(title,copies,pages,sheets,source_user,status,pdf_path,pdf_name,created_at) "
+                         "VALUES('test',1,1,1,'other','UPLOADING','cos://uploads/test.pdf','test.pdf',?)", (time.time(),))
+        with patch.object(server_web.storage, 'upload_stream', side_effect=RuntimeError('secret diagnostic')) as upload:
+            self.assertEqual(self.client.post(f'/api/v1/uploads/{tid}/file').status_code, 404)
+            upload.assert_not_called()
+            db.execute("UPDATE tasks SET source_user='admin' WHERE id=?", (tid,))
+            reply = self.client.post(f'/api/v1/uploads/{tid}/file', files={'file': ('test.pdf', b'pdf')})
+            self.assertEqual(reply.status_code, 502)
+            self.assertNotIn('secret diagnostic', reply.text)
+        self.assertEqual(db.one('SELECT status FROM tasks WHERE id=?', (tid,))['status'], 'UPLOADING')
 
     def test_logged_in_clients_can_cache_queue_but_only_one_can_claim(self):
         pdf_path = self.uploads / 'queued.pdf'

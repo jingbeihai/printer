@@ -54,6 +54,12 @@ def exists(location: str) -> bool:
     return Path(location).is_file()
 
 
+def upload_stream(location: str, stream) -> None:
+    """中转上传写入已签发的同一对象，不重新生成日期或文件名。"""
+    _cos_client().put_object(Bucket=config.COS_BUCKET, Key=_cos_key(location),
+                             Body=stream, ContentType="application/pdf")
+
+
 def download_url(location: str) -> str | None:
     if not location.startswith("cos://"):
         return None

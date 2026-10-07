@@ -135,6 +135,19 @@ def create_desktop_app(cloud_url: str, station=None) -> FastAPI:
             return local_failure(exc)
         return {'ok': True, 'id': pid}
 
+    @app.delete('/desktop/printers/{pid}')
+    async def delete_printer(request: Request, pid: int):
+        identity, error = await cloud_identity(request)
+        if error:
+            return error
+        if station is None:
+            return JSONResponse({'ok': False, 'error': '此客户端没有打印站服务'}, status_code=503)
+        try:
+            await run_in_threadpool(station.delete_printer, pid)
+        except ValueError as exc:
+            return local_failure(exc)
+        return {'ok': True}
+
     @app.post('/desktop/tasks/{tid}/print')
     async def print_task(request: Request, tid: int):
         identity, error = await cloud_identity(request)
@@ -167,6 +180,29 @@ def create_desktop_app(cloud_url: str, station=None) -> FastAPI:
         except ValueError as exc:
             return local_failure(exc)
         return {'ok': True}
+
+    @app.get('/desktop/fleet')
+    async def fleet(request: Request):
+        identity, error = await cloud_identity(request)
+        if error:
+            return error
+        if station is None:
+            return JSONResponse({'ok': False, 'error': '此客户端没有打印站服务'}, status_code=503)
+        return {'ok': True, 'tasks': await run_in_threadpool(station.fleet_tasks)}
+
+    @app.post('/desktop/tasks/{tid}/control')
+    async def control_task(request: Request, tid: int):
+        identity, error = await cloud_identity(request)
+        if error:
+            return error
+        if station is None:
+            return JSONResponse({'ok': False, 'error': '此客户端没有打印站服务'}, status_code=503)
+        body = await request.json()
+        try:
+            message = await run_in_threadpool(station.control_task, tid, body.get('action'), body.get('printer_id'))
+        except (ValueError, RuntimeError, OSError) as exc:
+            return local_failure(exc)
+        return {'ok': True, 'message': message or ''}
 
     @app.api_route('/api/v1/{path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
     async def api(request: Request, path: str):
