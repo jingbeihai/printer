@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-本地任务导入与闸口推进(代理侧)。
-一个云端任务 = 一个原始PDF + 份数 → 本地拆成若干小组(托盘上限) → 逐组合成打印PDF。
-闸口: 任何时刻最多一个任务处于 PRINTING/AWAITING_PICKUP;本地"已取件"后放行下一任务。
+正式桌面端本地任务导入与派发。
+一个云端班级作业对应一个本地打印作业；仅保留当前班级任务模型。
 """
 import json
 import re
@@ -10,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import config, db
-from .compose import compose_group_pdf, pdf_page_count, split_copies
+from .compose import compose_group_pdf, pdf_page_count
 from .models import GroupStatus, TaskStatus
 
 _COPIES_RE = re.compile(r"__\s*(\d+)\s*份")
@@ -28,29 +27,33 @@ def parse_filename(filename: str) -> tuple[str, "int | None"]:
 
 def create_local_task(cloud_id: int, title: str, pdf_path, copies: int,
                       priority: int = 0, meta: dict | None = None) -> int:
-    """拉取到的新任务 → 本地任务 + 小组拆分 + 合成。幂等(cloud_id 唯一)。"""
+    """Create one persistent local job per class. Idempotent by cloud_id."""
     dup = db.one("SELECT id FROM local_tasks WHERE cloud_id=?", (cloud_id,))
     if dup:
         return dup["id"]
+    meta = meta or {}
     pdf_path = Path(pdf_path)
     pages = pdf_page_count(pdf_path)
-    chunks = split_copies(pages, copies)
+    classes = int(meta.get("classes") or 0)
+    per_class = int(meta.get("copies_per_class") or 0)
+    if classes < 1 or per_class < 1 or classes * per_class != copies:
+        raise ValueError("班级数、每班份数与总份数不一致，请重新提交任务")
+    chunks = [per_class] * classes
     n = len(chunks)
-    meta = meta or {}
-    source = meta.get("source_user", "")
 
     prepared = []
     for i, c in enumerate(chunks, 1):
-        label = f"小组 {i}/{n}"
-        composed = config.COMPOSED_DIR / f"task{cloud_id}_g{i:03d}.pdf"
-        _, sheets = compose_group_pdf(pdf_path, composed, title, label, c, source)
+        label = f"第 {i} 班"
+        composed = config.COMPOSED_DIR / f"task{cloud_id}_class{i:04d}.pdf"
+        _, sheets = compose_group_pdf(pdf_path, composed, title, label, c)
         prepared.append((i, label, c, sheets, composed))
 
     tid = db.execute(
         "INSERT INTO local_tasks(cloud_id,title,meta_json,copies,pages,pdf_path,"
-        "status,priority,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        "status,priority,created_at,job_model) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (cloud_id, title, json.dumps(meta, ensure_ascii=False), copies, pages,
-         str(pdf_path), TaskStatus.QUEUED.value, priority, time.time()),
+         str(pdf_path), TaskStatus.QUEUED.value, priority, time.time(),
+         "class"),
     )
     for i, label, c, sheets, composed in prepared:
         db.execute(
@@ -60,37 +63,16 @@ def create_local_task(cloud_id: int, title: str, pdf_path, copies: int,
              GroupStatus.QUEUED.value),
         )
     db.log_event("TASK_SYNCED",
-                 f"云端任务#{cloud_id}《{title}》{pages}页×{copies}份,拆{n}组", task_id=tid)
-    if not config.MANUAL_PRINT:
-        maybe_release_next_task()
+                 f"云端任务#{cloud_id}《{title}》{pages}页×{copies}份,生成{n}个班级作业", task_id=tid)
+    maybe_release_next_task()
     return tid
-
-
 # ---------------- 闸口 ----------------
 
-def current_active_task():
-    return db.one("SELECT * FROM local_tasks WHERE status IN ('PRINTING','AWAITING_PICKUP')"
-                  " ORDER BY priority DESC, cloud_id LIMIT 1")
-
-
 def maybe_release_next_task():
-    """无活动任务时,把队首任务(优先级高者先,同优先级按云端ID)置为 PRINTING。"""
-    if config.MANUAL_PRINT:
-        for task in db.q("SELECT id,title FROM local_tasks WHERE status='QUEUED' AND print_requested=1"):
-            db.execute("UPDATE local_tasks SET status='PRINTING' WHERE id=?", (task['id'],))
-            db.log_event("TASK_STARTED", f"任务《{task['title']}》已启用打印", task_id=task['id'])
-        return
-    if current_active_task():
-        return
-    if config.MANUAL_PRINT:
-        nxt = db.one("SELECT * FROM local_tasks WHERE status='QUEUED' AND print_requested=1"
-                     " ORDER BY print_requested_at, priority DESC, cloud_id LIMIT 1")
-    else:
-        nxt = db.one("SELECT * FROM local_tasks WHERE status='QUEUED'"
-                     " ORDER BY priority DESC, cloud_id LIMIT 1")
-    if nxt:
-        db.execute("UPDATE local_tasks SET status='PRINTING' WHERE id=?", (nxt["id"],))
-        db.log_event("TASK_STARTED", f"任务《{nxt['title']}》开闸", task_id=nxt["id"])
+    """Enable only class jobs explicitly requested by the user."""
+    for task in db.q("SELECT id,title FROM local_tasks WHERE status='QUEUED' AND print_requested=1"):
+        db.execute("UPDATE local_tasks SET status='PRINTING' WHERE id=?", (task['id'],))
+        db.log_event("TASK_STARTED", f"任务《{task['title']}》已启用打印", task_id=task['id'])
 
 
 def on_group_done(group_id: int):

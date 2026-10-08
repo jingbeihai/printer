@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Windows 统一客户端入口。
 
-普通用户只看到云端任务中心；打印站打开同一 EXE 后可切换到本机的状态墙。
+普通用户通过正式云端界面和 Windows 本地打印站工作。
 配置写入用户目录，不会污染安装目录，也不会把令牌写进源码。
 """
 import json
@@ -24,17 +24,11 @@ SETTINGS_PATH = APP_DIR / "client-settings.json"
 def _settings() -> dict:
     defaults = {
         "cloud_url": config.CLOUD_URL,
-        "backend": config.BACKEND,
     }
     try:
         defaults.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         pass
-    legacy = "agent_token" in defaults or "station_mode" in defaults
-    defaults.pop("agent_token", None)
-    defaults.pop("station_mode", None)
-    if legacy:
-        _save_settings(defaults)
     return defaults
 
 

@@ -8,7 +8,6 @@
 import json
 import os
 import threading
-import time
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -18,9 +17,8 @@ from . import config, db, importer
 
 
 class CloudSync:
-    def __init__(self, cloud_url=None, token=None, cookie=None, client_id=None):
+    def __init__(self, cloud_url=None, cookie=None, client_id=None):
         self.base = (cloud_url or config.CLOUD_URL).rstrip("/")
-        self.token = token or config.AGENT_TOKEN
         self.cookie = cookie or ""
         self.client_id = client_id or ""
         self.last_error = ""
@@ -32,9 +30,7 @@ class CloudSync:
         self._active = False
 
     def _headers(self):
-        if self.cookie:
-            return {"Cookie": self.cookie, "X-Client-ID": self.client_id}
-        return {"X-Agent-Token": self.token}
+        return {"Cookie": self.cookie, "X-Client-ID": self.client_id}
 
     def _request(self, method, path, **kwargs):
         # 与桌面登录一致，避开失效的环境代理；每次请求使用独立会话。
@@ -60,7 +56,7 @@ class CloudSync:
             states[str(t["cloud_id"])] = t["status"]
         resp = self._request("POST", "/api/agent/sync",
                              json={"task_states": states, "client_id": self.client_id}, timeout=15)
-        if self.cookie and resp.status_code == 401:
+        if resp.status_code == 401:
             raise RuntimeError("云端尚未支持登录后同步，或登录已过期")
         resp.raise_for_status()
         data = resp.json()
@@ -75,24 +71,11 @@ class CloudSync:
             db.execute("UPDATE local_tasks SET priority=? WHERE cloud_id=?",
                        (int(pri), int(cid)))
 
-        # 登录后的每台客户端预先缓存全部尚未开始的排队 PDF，不自动打印。
-        if self.cookie:
-            for nt in data.get("new_tasks", []):
-                if not self._active:
-                    break
-                self._download(nt["id"], nt["pdf_name"])
-            return
-
-        # ---- 新任务 ----
+        # Cache queued PDFs for this signed-in desktop client; never auto-print.
         for nt in data.get("new_tasks", []):
-            if db.one("SELECT id FROM local_tasks WHERE cloud_id=?", (nt["id"],)):
-                continue
-            pdf_path = self._download(nt["id"], nt["pdf_name"])
-            meta = {k: nt.get(k, "") for k in
-                    ("school", "grade", "classes", "note", "source_user")}
-            importer.create_local_task(nt["id"], nt["title"], pdf_path,
-                                       int(nt["copies"]),
-                                       priority=int(nt.get("priority", 0)), meta=meta)
+            if not self._active:
+                break
+            self._download(nt["id"], nt["pdf_name"])
 
     def task_action(self, cloud_task_id: int, action: str):
         response = self._request(
@@ -109,7 +92,7 @@ class CloudSync:
         return data
 
     def _download(self, cloud_task_id: int, pdf_name: str) -> Path:
-        day_dir = config.UPLOAD_DIR / ("queue" if self.cookie else time.strftime("%Y-%m-%d"))
+        day_dir = config.UPLOAD_DIR / "queue"
         day_dir.mkdir(parents=True, exist_ok=True)
         safe = Path(pdf_name).name.replace("/", "_")
         path = day_dir / f"cloud{cloud_task_id}_{safe}"

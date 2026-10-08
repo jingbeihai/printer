@@ -38,10 +38,8 @@ TASK_STATUS_CN = {
     "CANCELED": "已取消",
 }
 
-ROLE_ADMIN = "admin"
 ROLE_SUPERADMIN = "superadmin"
 ROLE_USER = "user"
-ROLE_TEACHER = "teacher"
 
 STATE_COLOR = {
     "OFFLINE": "#9e9e9e",

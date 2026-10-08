@@ -204,6 +204,21 @@ def create_desktop_app(cloud_url: str, station=None) -> FastAPI:
             return local_failure(exc)
         return {'ok': True, 'message': message or ''}
 
+    @app.post('/desktop/tasks/{tid}/classes/{gid}/resolve')
+    async def resolve_class_group(request: Request, tid: int, gid: int):
+        identity, error = await cloud_identity(request)
+        if error:
+            return error
+        if station is None:
+            return JSONResponse({'ok': False, 'error': '此客户端没有打印站服务'}, status_code=503)
+        body = await request.json()
+        try:
+            message = await run_in_threadpool(station.resolve_class_group, tid, gid,
+                                              body.get('action'), bool(body.get('confirm_stopped')))
+        except (ValueError, RuntimeError, OSError) as exc:
+            return local_failure(exc)
+        return {'ok': True, 'message': message or ''}
+
     @app.api_route('/api/v1/{path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
     async def api(request: Request, path: str):
         suffix = '?' + request.url.query if request.url.query else ''

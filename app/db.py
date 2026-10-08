@@ -2,6 +2,7 @@
 """SQLite 持久化。云端与本地是两个独立进程,各自持有一份库。
 本模块为进程内单例: init(path, schema) 后用 q/one/execute 访问。"""
 import sqlite3
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -55,8 +56,8 @@ CREATE TABLE IF NOT EXISTS school_presets(
 );
 """
 
-# ---------------- 本地代理 schema ----------------
-AGENT_SCHEMA = """
+# ---------------- 本地印务台 schema ----------------
+LOCAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS printers(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT UNIQUE NOT NULL,
@@ -69,6 +70,11 @@ CREATE TABLE IF NOT EXISTS printers(
   page_counter INTEGER NOT NULL DEFAULT 0,
   pages_total INTEGER NOT NULL DEFAULT 0,
   tray_sheets INTEGER NOT NULL DEFAULT 250,
+  continuous_print_seconds REAL NOT NULL DEFAULT 0,
+  max_continuous_minutes INTEGER NOT NULL DEFAULT 120,
+  min_rest_minutes INTEGER NOT NULL DEFAULT 30,
+  warn_before_minutes INTEGER NOT NULL DEFAULT 15,
+  rest_until REAL NOT NULL DEFAULT 0,
   note TEXT DEFAULT '',
   last_seen REAL DEFAULT 0
 );
@@ -96,6 +102,11 @@ CREATE TABLE IF NOT EXISTS local_tasks(
   pdf_path TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'QUEUED',
   priority INTEGER NOT NULL DEFAULT 0,
+  paused INTEGER NOT NULL DEFAULT 0,
+  print_requested INTEGER NOT NULL DEFAULT 0,
+  print_requested_at REAL NOT NULL DEFAULT 0,
+  printer_ids TEXT NOT NULL DEFAULT '[]',
+  job_model TEXT NOT NULL DEFAULT 'class',
   created_at REAL NOT NULL, done_at REAL
 );
 CREATE TABLE IF NOT EXISTS groups(
@@ -131,6 +142,44 @@ def _pg_schema(schema: str) -> str:
                   .replace(" REAL", " DOUBLE PRECISION"))
 
 
+def _schema_columns(schema: str) -> dict[str, set[str]]:
+    tables = {}
+    for table, body in re.findall(
+            r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*?)\);", schema, re.S):
+        columns = set()
+        for line in body.splitlines():
+            match = re.match(r"\s*([a-zA-Z_]\w*)\s+", line)
+            if match:
+                columns.add(match.group(1))
+        tables[table] = columns
+    return tables
+
+
+def _validate_existing_schema(schema: str, postgres: bool) -> None:
+    expected = _schema_columns(schema)
+    if postgres:
+        rows = _conn.execute("SELECT table_name,column_name FROM information_schema.columns "
+                             "WHERE table_schema=current_schema()").fetchall()
+        actual = {}
+        for row in rows:
+            actual.setdefault(row["table_name"], set()).add(row["column_name"])
+    else:
+        names = {row["name"] for row in _conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        actual = {name: {row["name"] for row in _conn.execute(
+            f"PRAGMA table_info({name})")} for name in names}
+    if not any(name in actual for name in expected):
+        return
+    missing = []
+    for table, columns in expected.items():
+        absent = columns - actual.get(table, set())
+        if absent:
+            missing.append(f"{table}: {', '.join(sorted(absent))}")
+    if missing:
+        raise RuntimeError("数据库结构不受支持；未修改数据库。请先由管理员完成备份与迁移。缺少字段：" +
+                           "; ".join(missing))
+
+
 def init(path, schema):
     global _conn, _postgres
     target = str(path)
@@ -145,55 +194,21 @@ def init(path, schema):
     else:
         _conn = sqlite3.connect(target, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
     with _lock:
+        try:
+            _validate_existing_schema(schema, _postgres)
+        except Exception:
+            _conn.close()
+            _conn = None
+            raise
+        if not _postgres:
+            _conn.execute("PRAGMA journal_mode=WAL")
         if _postgres:
             for statement in _pg_schema(schema).split(";"):
                 if statement.strip():
                     _conn.execute(statement)
         else:
             _conn.executescript(schema)
-        # 兼容早期 SQLite 数据库：新增列以无损方式补齐。
-        if "printers" in schema and not _postgres:
-            existing = {r["name"] for r in _conn.execute("PRAGMA table_info(printers)")}
-            for name, definition in (
-                ("continuous_print_seconds", "REAL NOT NULL DEFAULT 0"),
-                ("max_continuous_minutes", "INTEGER NOT NULL DEFAULT 120"),
-                ("min_rest_minutes", "INTEGER NOT NULL DEFAULT 30"),
-                ("warn_before_minutes", "INTEGER NOT NULL DEFAULT 15"),
-                ("rest_until", "REAL NOT NULL DEFAULT 0"),
-            ):
-                if name not in existing:
-                    _conn.execute(f"ALTER TABLE printers ADD COLUMN {name} {definition}")
-            task_columns = {r["name"] for r in _conn.execute("PRAGMA table_info(local_tasks)")}
-            for name, definition in (
-                ("paused", "INTEGER NOT NULL DEFAULT 0"),
-                ("print_requested", "INTEGER NOT NULL DEFAULT 0"),
-                ("print_requested_at", "REAL NOT NULL DEFAULT 0"),
-                ("printer_ids", "TEXT NOT NULL DEFAULT '[]'"),
-            ):
-                if name not in task_columns:
-                    _conn.execute(f"ALTER TABLE local_tasks ADD COLUMN {name} {definition}")
-        if "CREATE TABLE IF NOT EXISTS tasks(" in schema:
-            if _postgres:
-                _conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS active INTEGER NOT NULL DEFAULT 1")
-                _conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''")
-                _conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS copies_per_class INTEGER")
-                _conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claimed_client_id TEXT NOT NULL DEFAULT ''")
-                _conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS print_requested_at DOUBLE PRECISION NOT NULL DEFAULT 0")
-            else:
-                user_columns = {r["name"] for r in _conn.execute("PRAGMA table_info(users)")}
-                if "active" not in user_columns:
-                    _conn.execute("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
-                if "display_name" not in user_columns:
-                    _conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
-                existing = {r["name"] for r in _conn.execute("PRAGMA table_info(tasks)")}
-                if "copies_per_class" not in existing:
-                    _conn.execute("ALTER TABLE tasks ADD COLUMN copies_per_class INTEGER")
-                if "claimed_client_id" not in existing:
-                    _conn.execute("ALTER TABLE tasks ADD COLUMN claimed_client_id TEXT NOT NULL DEFAULT ''")
-                if "print_requested_at" not in existing:
-                    _conn.execute("ALTER TABLE tasks ADD COLUMN print_requested_at REAL NOT NULL DEFAULT 0")
         # SQLite 专有维护语句；PostgreSQL 不支持 PRAGMA。
         if not _postgres:
             _conn.execute("PRAGMA optimize")

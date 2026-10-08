@@ -47,7 +47,7 @@ class UploadRegressionTests(unittest.TestCase):
         self.assertEqual(task['status'], 'QUEUED')
         self.assertEqual(Path(task['pdf_path']).read_bytes(), pdf.getvalue())
         download = self.client.get(f"/api/agent/file/{task['id']}",
-                                  headers={'X-Agent-Token': db.get_conf('agent_token')})
+                                  headers={'X-Client-ID': str(uuid.uuid4())})
         self.assertEqual(download.content, pdf.getvalue())
 
     def test_download_encodes_unicode_and_special_filename_characters(self):
@@ -59,7 +59,8 @@ class UploadRegressionTests(unittest.TestCase):
                 tid = db.execute(
                     "INSERT INTO tasks(title,copies,pages,sheets,source_user,pdf_path,pdf_name,created_at) "
                     "VALUES('test',1,1,1,'admin',?,?,?)", (str(pdf_path), filename, time.time()))
-                reply = self.client.get(f'/api/agent/file/{tid}')
+                reply = self.client.get(f'/api/agent/file/{tid}',
+                                        headers={'X-Client-ID': str(uuid.uuid4())})
                 self.assertEqual(reply.status_code, 200)
                 self.assertEqual(reply.content, b'pdf-content')
                 header = reply.headers['content-disposition']
@@ -116,7 +117,8 @@ class UploadRegressionTests(unittest.TestCase):
             "VALUES('练习卷',1,1,1,'other-user',?,'queued.pdf',?)",
             (str(pdf_path), time.time()))
         client_a, client_b = str(uuid.uuid4()), str(uuid.uuid4())
-        self.assertEqual(self.client.get(f'/api/agent/file/{tid}').content, b'queued-pdf')
+        self.assertEqual(self.client.get(f'/api/agent/file/{tid}', headers={
+            'X-Client-ID': client_a}).content, b'queued-pdf')
         first = self.client.post(f'/api/v1/tasks/{tid}/claim', json={'client_id': client_a})
         second = self.client.post(f'/api/v1/tasks/{tid}/claim', json={'client_id': client_b})
         self.assertEqual(first.status_code, 200)
@@ -125,15 +127,29 @@ class UploadRegressionTests(unittest.TestCase):
                        if task['id'] == tid)
         self.assertTrue(visible['claimed'])
         self.assertNotIn('claimed_client_id', visible)
-        waiting = self.client.post('/api/agent/sync', json={
+        waiting = self.client.post('/api/agent/sync', headers={'X-Client-ID': client_b}, json={
             'client_id': client_b, 'task_states': {str(tid): 'PRINTING'}})
         self.assertEqual(waiting.status_code, 200)
         self.assertEqual(db.one('SELECT status FROM tasks WHERE id=?', (tid,))['status'], 'QUEUED')
-        claimed = self.client.post('/api/agent/sync', json={
+        claimed = self.client.post('/api/agent/sync', headers={'X-Client-ID': client_a}, json={
             'client_id': client_a, 'task_states': {str(tid): 'PRINTING'}})
         self.assertEqual(claimed.status_code, 200)
         self.assertEqual(db.one('SELECT status FROM tasks WHERE id=?', (tid,))['status'], 'PRINTING')
-        self.assertEqual(self.client.get(f'/api/agent/file/{tid}').status_code, 403)
+        self.assertEqual(self.client.get(f'/api/agent/file/{tid}', headers={
+            'X-Client-ID': client_a}).status_code, 403)
+
+    def test_agent_token_alone_is_rejected_and_retired_pages_redirect(self):
+        anonymous = TestClient(server_web.create_app())
+        self.addCleanup(anonymous.close)
+        reply = anonymous.post('/api/agent/sync', headers={'X-Agent-Token': 'old-token'}, json={})
+        self.assertEqual(reply.status_code, 401)
+        for path in ('/submit', '/queue', '/admin', '/dashboard'):
+            with self.subTest(path=path):
+                response = anonymous.get(path, follow_redirects=False)
+                self.assertEqual(response.status_code, 307)
+                self.assertEqual(response.headers['location'], '/desk/')
+        self.assertEqual(anonymous.post('/submit').status_code, 405)
+        self.assertEqual(anonymous.get('/dashboard.csv').status_code, 404)
 
     def test_retention_retries_failures_and_keeps_recent_objects(self):
         now = time.time()

@@ -45,15 +45,12 @@ class StationRuntime:
             if self.enabled:
                 return
             config.CLOUD_URL = self.settings["cloud_url"]
-            config.AGENT_TOKEN = ""
-            config.BACKEND = "windows"
-            config.MANUAL_PRINT = True
             config.DATA_DIR = self.settings_dir / "station"
             config.UPLOAD_DIR = config.DATA_DIR / "uploads"
             config.COMPOSED_DIR = config.DATA_DIR / "composed"
             config.LOCAL_DB = config.DATA_DIR / "local.db"
             config.ensure_dirs()
-            db.init(config.LOCAL_DB, db.AGENT_SCHEMA)
+            db.init(config.LOCAL_DB, db.LOCAL_SCHEMA)
             self.executor = Executor(backend=WindowsBackend(), syncer=None)
             self.executor.start()
 
@@ -107,13 +104,25 @@ class StationRuntime:
             return []
         result = []
         for task in db.q("SELECT * FROM local_tasks WHERE print_requested=1 AND status NOT IN ('DONE','CANCELED') ORDER BY print_requested_at,id"):
-            groups = db.q("SELECT printer_id,status FROM groups WHERE task_id=?", (task['id'],))
+            groups = db.q("SELECT printer_id,status,label FROM groups WHERE task_id=? ORDER BY seq", (task['id'],))
+            per_printer = {}
+            for group in groups:
+                if group['printer_id'] is not None:
+                    per_printer.setdefault(group['printer_id'], []).append(group)
             result.append({'id': task['cloud_id'], 'title': task['title'],
                            'status': task['status'], 'paused': bool(task['paused']),
                            'printer_ids': json.loads(task['printer_ids']),
                            'active_printer_ids': [g['printer_id'] for g in groups if g['status']=='PRINTING'],
                            'completed_groups': sum(g['status']=='DONE' for g in groups),
-                           'total_groups': len(groups)})
+                           'total_groups': len(groups),
+                           'allocations': [{'printer_id': pid, 'groups': len(items),
+                                            'labels': [g['label'] for g in items],
+                                            'completed': sum(g['status']=='DONE' for g in items),
+                                            'blocked': sum(g['status']=='PAUSED' for g in items)}
+                                           for pid, items in sorted(per_printer.items())],
+                           'blocked_groups': [{'id': g['id'], 'label': g['label'],
+                                               'printer_id': g['printer_id'], 'status': g['status']}
+                                              for g in db.q("SELECT id,label,printer_id,status FROM groups WHERE task_id=? AND status='PAUSED'", (task['id'],))]})
         return result
 
     def control_task(self, cloud_id, action, printer_id=None):
@@ -164,6 +173,48 @@ class StationRuntime:
                     self.executor._idle_since.pop(group['printer_id'], None)
             db.log_event('TASK_CONTROL', action, task_id=task['id'])
             return ('已停止后续下发；已进入打印机缓存的页面可能继续出纸' if action!='resume' and active and not matched else '')
+
+    def resolve_class_group(self, cloud_id, group_id, action, confirm_stopped=False):
+        if action not in ('recover', 'complete', 'retry'):
+            raise ValueError("不支持的班级作业处理方式")
+        with self.print_lock, self.executor.control_lock:
+            task = db.one("SELECT * FROM local_tasks WHERE cloud_id=? AND job_model='class'", (cloud_id,))
+            group = db.one("SELECT * FROM groups WHERE id=? AND task_id=?", (group_id, task['id'])) if task else None
+            if not group or group['status'] != 'PAUSED':
+                raise ValueError("该班级作业不存在或不需要人工处理")
+            if action == 'recover' and group['started_at'] is not None:
+                raise ValueError("该班级已提交到队列，必须确认已完成或整班重打")
+            printer = db.one("SELECT * FROM printers WHERE id=? AND enabled=1", (group['printer_id'],))
+            if not printer:
+                raise ValueError("原分配打印机已不可用")
+            try:
+                info = self.executor.backend.poll(dict(printer))
+            except Exception as exc:
+                raise ValueError(f"无法确认原打印机状态：{exc}") from exc
+            if info.get('status') != 'idle':
+                raise ValueError("原打印机仍有故障或正在打印，请先处理至空闲状态")
+            if action == 'complete':
+                if group['started_at'] is None:
+                    raise ValueError("该班级尚未提交，不能确认已完成")
+                db.execute("UPDATE groups SET status='DONE',done_at=? WHERE id=?", (time.time(), group_id))
+                db.log_event("CLASS_MARKED_DONE", f"人工确认{group['label']}已完成", printer_id=printer['id'], group_id=group_id, task_id=task['id'])
+                importer.on_group_done(group_id)
+                return "已记录该班级完成"
+            if action == 'retry':
+                if group['started_at'] is None:
+                    raise ValueError("该班级尚未提交，请使用恢复操作")
+                if not confirm_stopped:
+                    raise ValueError("请先确认 Windows 队列中的旧作业已停止，并确认废弃已出纸张")
+                try:
+                    matched = self.executor.backend.control_group(dict(printer), group['composed_path'], 'cancel')
+                except Exception as exc:
+                    raise ValueError(f"无法确认旧作业已停止：{exc}") from exc
+                if not matched:
+                    raise ValueError("未能精确匹配并停止旧作业；请在 Windows 队列处理后重试")
+            db.execute("UPDATE groups SET status='QUEUED',started_at=NULL,start_counter=NULL WHERE id=?", (group_id,))
+            db.execute("UPDATE printers SET state='IDLE' WHERE id=?", (printer['id'],))
+            db.log_event("CLASS_RELEASED", f"人工将{group['label']}留在原打印机重新派发({action})", printer_id=printer['id'], group_id=group_id, task_id=task['id'])
+            return "该班级已保留在原打印机等待派发"
 
     def add_printer(self, name: str, queue: str, ip: str = ""):
         if not self.enabled:
@@ -223,11 +274,42 @@ class StationRuntime:
         if not task:
             pdf_path = syncer._download(cloud_id, cloud_task["pdf_name"])
             meta = {key: cloud_task.get(key, "") for key in
-                    ("school", "grade", "classes", "note", "source_user")}
+                    ("school", "grade", "classes", "copies_per_class", "note", "source_user")}
+            if not meta.get("copies_per_class") and meta.get("classes"):
+                total = int(cloud_task.get("copies", 0))
+                classes = int(meta["classes"] or 0)
+                if classes < 1 or total % classes:
+                    raise ValueError("任务缺少完整班级份数信息，请重新提交任务")
+                meta["copies_per_class"] = total // classes
             importer.create_local_task(
                 cloud_id, cloud_task["title"], pdf_path, int(cloud_task["copies"]),
                 priority=int(cloud_task.get("priority", 0)), meta=meta)
             task = db.one("SELECT * FROM local_tasks WHERE cloud_id=?", (cloud_id,))
+        elif task['job_model'] != 'class':
+            raise ValueError("本地缓存为不受支持的旧作业。请先取消旧任务，再重新提交云端任务")
+        task_meta = json.loads(task['meta_json'] or '{}')
+        classes = int(cloud_task.get('classes') or task_meta.get('classes') or 0)
+        total_copies = int(cloud_task.get('copies') or task['copies'] or 0)
+        copies_per_class = int(cloud_task.get('copies_per_class') or task_meta.get('copies_per_class') or 0)
+        if not copies_per_class and classes and total_copies % classes == 0:
+            copies_per_class = total_copies // classes
+        if classes < 1 or copies_per_class < 1 or classes * copies_per_class != total_copies:
+            raise ValueError("班级数、每班份数与总份数不完整或不一致，请重新提交任务")
+        groups = db.q("SELECT id,seq,copies FROM groups WHERE task_id=? ORDER BY seq", (task['id'],))
+        if len(groups) != classes or any(group['seq'] != index or group['copies'] != copies_per_class
+                                         for index, group in enumerate(groups, 1)):
+            raise ValueError("本地班级作业数量或份数与云端任务不一致，请重新提交")
+        ordered_printers = sorted(chosen, key=lambda pid: (str(db.one("SELECT name FROM printers WHERE id=?", (pid,))["name"]).lower(), pid))
+        base, extra = divmod(len(groups), len(ordered_printers))
+        cursor = 0
+        for index, pid in enumerate(ordered_printers):
+            count = base + (1 if index < extra else 0)
+            for group in groups[cursor:cursor + count]:
+                db.execute("UPDATE groups SET printer_id=? WHERE id=?", (pid, group['id']))
+            cursor += count
+        db.log_event("CLASS_ALLOCATION", "; ".join(
+            f"{db.one('SELECT name FROM printers WHERE id=?', (pid,))['name']}:{base + (1 if i < extra else 0)}班"
+            for i, pid in enumerate(ordered_printers)), task_id=task['id'])
         syncer.task_action(cloud_id, "claim")
         db.execute("UPDATE local_tasks SET print_requested=1,print_requested_at=?,printer_ids=? WHERE id=?",
                    (time.time(), json.dumps(sorted(chosen)), task["id"]))

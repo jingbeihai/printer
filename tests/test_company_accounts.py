@@ -73,14 +73,18 @@ class CompanyAccountTests(unittest.TestCase):
             'invite_code': 'blocked-code'}).status_code, 403)
         self.assertEqual(self.client.get('/api/v1/bootstrap').json()['presets'][0]['school'], '乙学校')
 
-    def test_old_roles_migrate_to_two_roles(self):
+    def test_old_roles_are_not_converted_or_promoted(self):
         db.execute("INSERT INTO users(username,pw_hash,role,created_at) VALUES(?,?,?,0)",
                    ('old-admin', hash_password('password-123'), 'admin'))
         db.execute("INSERT INTO users(username,pw_hash,role,created_at) VALUES(?,?,?,0)",
                    ('old-teacher', hash_password('password-123'), 'teacher'))
         server_web.ensure_defaults()
         self.assertEqual({u['role'] for u in db.q('SELECT role FROM users')},
-                         {'superadmin', 'user'})
+                         {'superadmin', 'admin', 'teacher'})
+        with TestClient(server_web.create_app()) as legacy_client:
+            legacy_client.cookies.set(server_web.SESSION_COOKIE,
+                                      make_session({'uid': db.one("SELECT id FROM users WHERE username='old-admin'")['id']}))
+            self.assertEqual(legacy_client.get('/api/v1/admin/overview').status_code, 403)
 
     def test_public_old_invite_is_rotated_on_upgrade(self):
         db.set_conf('invite_code', '101010')

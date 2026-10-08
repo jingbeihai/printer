@@ -78,7 +78,7 @@ async function accountRequest(init?:RequestInit):Promise<{ok:boolean;error?:stri
 }
 export const loadAccount=()=>accountRequest();
 export const updateAccount=(value:{display_name:string;old_password?:string;new_password?:string})=>accountRequest({method:"PUT",...jsonBody(value)});
-export type FleetTask={id:number;title:string;status:string;paused:boolean;printer_ids:number[];active_printer_ids:number[];completed_groups:number;total_groups:number};
+export type FleetTask={id:number;title:string;status:string;paused:boolean;printer_ids:number[];active_printer_ids:number[];completed_groups:number;total_groups:number;allocations:{printer_id:number;groups:number;labels:string[];completed:number;blocked:number}[];blocked_groups:{id:number;label:string;printer_id:number;status:string}[]};
 type LocalReply={ok:boolean;error?:string;message?:string;tasks?:FleetTask[];printers?:{queue:string;driver:string;port:string}[]};
 async function localRequest(path:string,init?:RequestInit):Promise<LocalReply>{
   const response=await fetch(path,{credentials:"include",...init});
@@ -94,6 +94,7 @@ export const addPrinter=(input:{name:string;queue:string;ip:string})=>localReque
 export const deletePrinter=(id:number)=>localRequest(`/desktop/printers/${id}`,{method:"DELETE"});
 export const loadFleet=async()=> (await localRequest('/desktop/fleet')).tasks||[];
 export const controlFleetTask=(id:number,action:'pause'|'resume'|'cancel'|'up'|'down',printer_id?:number)=>localRequest(`/desktop/tasks/${id}/control`,jsonPost({action,printer_id}));
+export const resolveFleetClass=(id:number,groupId:number,action:'recover'|'complete'|'retry',confirm_stopped=false)=>localRequest(`/desktop/tasks/${id}/classes/${groupId}/resolve`,jsonPost({action,confirm_stopped}));
 export const printTask=(id:number,printerIds:number[])=>localRequest(`/desktop/tasks/${id}/print`,jsonPost({printer_ids:printerIds}));
 export const confirmPickup=(id:number)=>localRequest(`/desktop/tasks/${id}/pickup`,{method:"POST"});
 type UploadReply={ok:boolean;task_id?:number;storage_backend?:"local";upload_url?:string;error?:string};
