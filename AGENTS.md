@@ -38,3 +38,18 @@
 - 前端构建：在 prototype 目录运行 npm run build；静态产物为 prototype/dist/client。打包脚本 build_exe.ps1 会构建、复制资源、安装依赖并运行 PyInstaller，不能当作只读检查执行。
 - Python 测试使用 unittest；从项目根目录执行 python -m unittest discover -s tests，或按相关 test_*.py 文件筛选。测试环境需具备对应依赖；这里列出命令不表示已运行或通过。
 - 文档变更只核对路径、链接、源码事实和改动范围，不触发打印、构建或部署验证。
+
+## 云服务器常用命令
+仓库中的 `deploy/print-cluster.service` 模板使用 `/opt/print-cluster` 作为工作目录，服务名为 `print-cluster`，通过 `/opt/print-cluster/.venv/bin/python run.py server` 启动。以下命令适用于服务器实际安装与该模板一致、且已用有仓库写权限的账号登录的情况；执行前先核对现场服务配置。
+
+```bash
+sudo systemctl cat print-cluster
+cd /opt/print-cluster
+git status --short
+git pull --ff-only origin main
+sudo systemctl restart print-cluster
+sudo systemctl status print-cluster --no-pager
+sudo journalctl -u print-cluster -n 100 --no-pager
+```
+
+本次 T002 升级前还需备份并核对云端数据库为当前 schema，处理未结束的旧任务；旧库缺字段时新服务会停止启动，不会自动迁移。`git status --short` 若显示服务器本地改动，应先查明来源，不要强行覆盖。上面是操作说明，不授权自动拉取、重启或部署。
