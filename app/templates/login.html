@@ -3,31 +3,34 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#3165df"><title>登录 · 绍兴数知学校服务</title>
-<style>
-:root{--blue:#3165df;--ink:#26364d;--muted:#7b899d;--line:#e4eaf2}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:#f5f7fb;font:14px/1.6 "Segoe UI","Microsoft YaHei UI",sans-serif}a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.header{height:72px;padding:0 5%;display:flex;align-items:center;gap:12px;background:#fff;border-bottom:1px solid var(--line)}.mark{display:grid;place-items:center;width:36px;height:36px;background:var(--blue);color:white;border-radius:10px;font-size:19px;font-weight:700}.header strong{font-size:20px;letter-spacing:2px}.header span:last-child{border-left:1px solid var(--line);padding-left:16px;color:var(--muted);font-size:13px}.layout{max-width:1240px;min-height:calc(100vh - 122px);margin:auto;padding:40px 5%;display:grid;grid-template-columns:minmax(0,1.2fr) minmax(300px,.85fr);gap:7%;align-items:center}.intro{position:relative}.eyebrow{color:var(--blue);font-size:12px;font-weight:600;letter-spacing:3px}.intro h1{font-size:clamp(28px,3.5vw,44px);line-height:1.4;letter-spacing:1px;margin:16px 0}.intro h1 span{color:var(--blue)}.intro p{color:var(--muted);max-width:390px;line-height:1.9}.scene{width:100%;max-width:470px;display:block;margin:24px 0 10px}.tags{display:flex;gap:18px;color:#627898;font-size:12px}.tags span::before{content:'•';color:var(--blue);margin-right:6px}.partners{margin-top:25px;padding-top:18px;border-top:1px solid #dfe7f3;display:flex;gap:25px;font-size:13px}.partners small{display:block;color:var(--muted);font-size:11px;margin-bottom:3px}.partners strong{font-weight:600}.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:32px;box-shadow:0 16px 45px #254a8510}.card h2{font-size:24px;margin:0 0 6px}.subtitle{color:var(--muted);margin:0 0 26px;font-size:13px}.field{display:block;font-weight:500;margin-bottom:18px}.field input{display:block;width:100%;height:44px;padding:10px 12px;margin-top:7px;border:1px solid #dce3ec;border-radius:7px;font:inherit;color:var(--ink);background:#fff;outline:none}.field input:focus{border-color:var(--blue);box-shadow:0 0 0 3px #3165df18}.remember{display:flex;align-items:center;gap:8px;font-size:12px;color:#62738a;cursor:pointer;margin:3px 0 22px;font-weight:400}.remember input{appearance:auto;accent-color:var(--blue);width:16px;height:16px;min-width:16px;min-height:16px;flex:0 0 16px;margin:0;padding:0;cursor:pointer}.remember input:focus-visible{outline:2px solid var(--blue);outline-offset:3px}.submit{width:100%;height:44px;border:0;border-radius:7px;background:var(--blue);color:white;font:600 14px "Microsoft YaHei UI",sans-serif;cursor:pointer}.submit:hover{background:#2857c7}.foot{text-align:center;font-size:12px;color:var(--muted);margin:22px 0 0}.error{border:1px solid #f4ceca;border-radius:7px;padding:10px 12px;background:#fff3f1;color:#ad4c43;font-size:13px;margin-bottom:18px}.footer{text-align:center;color:#929daf;font-size:11px;padding:14px 20px}.local-note{font-size:11px;color:#929daf;margin:10px 0 0;text-align:center}@media(max-width:720px){.header{height:60px}.header span:last-child{font-size:11px}.layout{grid-template-columns:1fr;gap:24px;padding:26px 22px;min-height:calc(100vh - 110px)}.intro h1{font-size:26px;margin:8px 0}.intro h1 br{display:none}.intro p,.scene,.tags{display:none}.partners{margin-top:14px;padding-top:12px}.card{width:100%;max-width:420px;justify-self:center;padding:25px}.intro{max-width:420px;width:100%;justify-self:center}}@media(max-height:650px) and (min-width:721px){.layout{padding-top:22px;padding-bottom:22px}.scene{max-height:150px;margin:12px 0}.intro h1{font-size:30px;margin:10px 0}.partners{margin-top:14px}.card{padding:25px}}
-</style>
+<link rel="stylesheet" href="/desk/login/login.css">
+<link rel="preload" as="image" href="/desk/login/campus.webp">
 </head>
 <body>
-<header class="header"><div class="mark" aria-hidden="true">知</div><strong>绍兴数知</strong><span>学校服务 · 印务台</span></header>
+<div class="campus-backdrop" aria-hidden="true">
+<img class="campus-art" src="/desk/login/campus.webp" alt="" fetchpriority="high">
+<div class="cloud cloud-one"></div><div class="cloud cloud-two"></div>
+<img class="branch" src="/desk/login/branch.webp" alt="">
+<img class="branch branch-near" src="/desk/login/branch.webp" alt="">
+<i class="leaf" style="--x:12%;--size:13px;--duration:21s;--delay:-7s"></i>
+<i class="leaf" style="--x:30%;--size:10px;--duration:25s;--delay:-18s"></i>
+<i class="leaf" style="--x:48%;--size:17px;--duration:20s;--delay:-3s"></i>
+<i class="leaf" style="--x:63%;--size:12px;--duration:26s;--delay:-13s"></i>
+<i class="leaf" style="--x:78%;--size:15px;--duration:23s;--delay:-21s"></i>
+<i class="leaf" style="--x:94%;--size:11px;--duration:28s;--delay:-10s"></i>
+</div>
+
+<header class="header"><div class="mark" aria-hidden="true">知</div><strong>绍兴数知</strong><span class="header-subtitle">学校服务 · 印务台</span><button type="button" class="motion-toggle" aria-pressed="false">暂停动画</button></header>
 <main class="layout">
 <section class="intro" aria-label="学校服务介绍">
 <div class="eyebrow">SMART EDUCATION</div>
 <h1>让校园服务更简单<br><span>让智慧教育更进一步</span></h1>
 <p>连接学校日常服务与智慧 AI 教育，<br>从每一份教学资料开始，为教与学提供支持。</p>
-<svg class="scene" viewBox="0 0 480 230" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="书本、校园与 AI 节点连接的智慧教育插画">
-<ellipse cx="238" cy="204" rx="207" ry="18" fill="#e7eefb"/>
-<path d="M35 145V50h100M350 50h90v95M90 180h300" stroke="#c7d8f7" stroke-width="2" stroke-dasharray="5 7"/>
-<rect x="104" y="79" width="265" height="118" rx="9" fill="#fff" stroke="#b8ccef" stroke-width="2"/>
-<path d="m89 83 147-53 148 53" stroke="#7096dc" stroke-width="3" stroke-linecap="round"/>
-<path d="M219 197v-47h35v47" fill="#dbe7fc"/>
-<g fill="#e6eefe" stroke="#b8ccef"><rect x="126" y="103" width="25" height="23" rx="3"/><rect x="170" y="103" width="25" height="23" rx="3"/><rect x="277" y="103" width="25" height="23" rx="3"/><rect x="321" y="103" width="25" height="23" rx="3"/><rect x="126" y="147" width="25" height="23" rx="3"/><rect x="170" y="147" width="25" height="23" rx="3"/><rect x="277" y="147" width="25" height="23" rx="3"/><rect x="321" y="147" width="25" height="23" rx="3"/></g>
-<circle cx="237" cy="101" r="20" fill="#3165df"/><path d="m225 99 12-6 12 6-12 6-12-6Zm5 4v7l7 3 7-3v-7" stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
-<rect x="346" y="13" width="66" height="54" rx="13" fill="#3165df"/><text x="379" y="48" fill="white" font-family="Segoe UI,sans-serif" font-size="25" text-anchor="middle">AI</text>
-<rect x="22" y="124" width="70" height="66" rx="12" fill="#edf3ff" stroke="#bed0f2"/><path d="M57 145c-8-6-18-6-23-3v29c7-3 15-2 23 3 8-5 16-6 23-3v-29c-5-3-15-3-23 3Zm0 0v29" stroke="#5f87d1" stroke-width="2"/>
-<circle cx="35" cy="50" r="6" fill="#7fa0dd"/><circle cx="440" cy="145" r="6" fill="#7fa0dd"/>
-</svg>
+<div class="scene-space" role="img" aria-label="蓝天、操场与结伴同行的学生，充满青春友情的校园"></div>
+<div class="intro-details">
 <div class="tags"><span>学校服务</span><span>智慧 AI 教育</span><span>教学资料协同</span></div>
 <div class="partners"><div><small>服务企业</small><strong>绍兴数知</strong></div><div><small>合作单位</small><strong>讯飞星火</strong></div></div>
+</div>
 </section>
 <section class="card" aria-labelledby="login-title">
 <h2 id="login-title">欢迎登录</h2><p class="subtitle">登录印务台，管理您的教学打印任务</p>
@@ -42,6 +45,7 @@
 </section>
 </main>
 <footer class="footer">绍兴数知 · 学校服务与智慧教育</footer>
+<script src="/desk/login/motion.js" defer></script>
 <script>
 (()=>{
  const form=document.getElementById('login-form'),user=form.elements.username,pass=form.elements.password,remember=document.getElementById('remember-login'),key='canon-print-login';

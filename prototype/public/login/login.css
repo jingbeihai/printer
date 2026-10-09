@@ -1,0 +1,43 @@
+:root{--blue:#3165df;--ink:#26364d;--muted:#718198;--line:#e4eaf2}
+*{box-sizing:border-box}
+body{margin:0;position:relative;isolation:isolate;color:var(--ink);background:#eff6fc;font:14px/1.6 "Segoe UI","Microsoft YaHei UI",sans-serif}
+a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
+.campus-backdrop{position:absolute;inset:0;overflow:hidden;z-index:-1;pointer-events:none;background:#d8edfa}
+.campus-art{position:absolute;top:35px;width:100%;height:calc(100% - 35px);object-fit:cover;object-position:center top}
+.campus-backdrop::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(255,255,255,.86),rgba(255,255,255,.22) 41%,transparent 64%);height:48%;mask-image:linear-gradient(#000 55%,transparent);pointer-events:none}
+.cloud{position:absolute;width:400px;height:120px;opacity:.58;filter:blur(8px);background:radial-gradient(ellipse at 25% 68%,#fff 0 24%,transparent 26%),radial-gradient(ellipse at 49% 45%,#fff 0 30%,transparent 32%),radial-gradient(ellipse at 73% 62%,#fff 0 25%,transparent 27%);animation:cloud-drift 42s ease-in-out infinite alternate}
+.cloud-one{top:8%;left:36%}.cloud-two{top:21%;left:57%;width:290px;height:85px;opacity:.4;animation-duration:57s;animation-delay:-24s}
+.branch{position:absolute;top:-40px;right:-45px;width:min(660px,52vw);height:auto;transform-origin:94% 3%;animation:branch-sway 7s ease-in-out infinite alternate;filter:drop-shadow(0 5px 8px #2645210a)}
+.branch-near{top:auto;right:auto;bottom:-105px;left:-145px;width:440px;transform-origin:5% 95%;opacity:.65;filter:blur(2px);animation-name:branch-near-sway;animation-duration:9s}
+.leaf{position:absolute;top:-45px;left:var(--x);width:var(--size,15px);height:calc(var(--size,15px) * .5);border-radius:95% 0 95% 0;background:linear-gradient(155deg,#b4cc69 6%,#78a648 48%,#b9cc71 53%,#779848 100%);box-shadow:0 1px 2px #35572715;animation:leaf-fall var(--duration,19s) linear infinite;animation-delay:var(--delay,0s);opacity:0}
+.leaf::after{content:"";position:absolute;top:50%;left:7%;width:83%;height:1px;background:#d9e4a580;transform:rotate(-22deg)}
+@keyframes cloud-drift{from{transform:translateX(-55px)}to{transform:translateX(95px)}}
+@keyframes branch-sway{from{transform:rotate(-1.8deg) translateY(-4px)}to{transform:rotate(1.6deg) translateY(3px)}}
+@keyframes branch-near-sway{from{transform:rotate(175deg) translateY(0)}to{transform:rotate(179deg) translateY(9px)}}
+@keyframes leaf-fall{0%{transform:translate3d(0,-30px,0) rotate(0);opacity:0}8%{opacity:.8}32%{transform:translate3d(-75px,32vh,0) rotate(95deg)}62%{transform:translate3d(20px,65vh,0) rotate(230deg);opacity:.72}92%{opacity:.55}100%{transform:translate3d(-120px,115vh,0) rotate(380deg);opacity:0}}
+.motion-paused .cloud,.motion-paused .branch,.motion-paused .leaf,.page-hidden .cloud,.page-hidden .branch,.page-hidden .leaf{animation-play-state:paused}
+.header{min-height:76px;padding:16px max(5%,calc((100% - 1320px)/2));display:flex;align-items:center;gap:12px;background:linear-gradient(90deg,#ffffffed,#ffffffa6 52%,#ffffff20)}
+.mark{display:grid;place-items:center;width:36px;height:36px;background:var(--blue);color:#fff;border-radius:10px;font-size:19px;font-weight:700;flex:none}
+.header strong{font-size:22px;letter-spacing:2px;white-space:nowrap}.header-subtitle{border-left:1px solid #b7c9e0;padding-left:16px;color:#405c82;font-size:14px}
+.motion-toggle{margin-left:auto;flex:none;padding:7px 12px;border:1px solid #ffffffb3;border-radius:20px;background:#ffffffc9;color:#4e6688;font:inherit;font-size:11px;cursor:pointer;box-shadow:0 2px 10px #345a8210}.motion-toggle:hover{background:#fff}.motion-toggle:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+.layout{max-width:1440px;min-height:calc(100svh - 122px);margin:auto;padding:40px 5% 25px;display:grid;grid-template-columns:minmax(0,1.35fr) minmax(320px,.85fr);gap:6%;align-items:center}
+.intro{position:relative;align-self:stretch;display:flex;flex-direction:column;min-width:0}
+.eyebrow{color:var(--blue);font-size:12px;font-weight:600;letter-spacing:5px;margin-top:8px}
+.intro h1{font-size:clamp(28px,3.25vw,46px);line-height:1.42;letter-spacing:1px;margin:16px 0 12px;color:#122b51;text-shadow:0 2px 22px #fff9}.intro h1 span{color:var(--blue)}
+.intro p{color:#536b89;line-height:1.9;margin:0;max-width:470px;font-size:15px;text-shadow:0 1px 10px #fff}
+.scene-space{flex:1;min-height:290px}
+.intro-details{background:#ffffffed;border:1px solid #fff;border-radius:12px;padding:15px 20px;box-shadow:0 6px 28px #263f6408}
+.tags{display:flex;flex-wrap:wrap;gap:8px 20px;color:#405e88;font-size:12px}.tags span::before{content:'•';color:var(--blue);margin-right:6px}
+.partners{margin-top:12px;padding-top:11px;border-top:1px solid #e0e8f4;display:flex;gap:32px;font-size:13px}.partners small{display:block;color:var(--muted);font-size:10px;margin-bottom:2px}.partners strong{font-weight:600}
+.card{background:#fffffffa;border:1px solid #fff;border-radius:18px;padding:36px;box-shadow:0 18px 60px #254a8524;width:100%;max-width:440px;justify-self:end}
+.card h2{font-size:26px;margin:0 0 6px;color:#142e54}.subtitle{color:var(--muted);margin:0 0 26px;font-size:13px}
+.field{display:block;font-weight:500;margin-bottom:18px}.field input{display:block;width:100%;height:44px;padding:10px 12px;margin-top:7px;border:1px solid #dce3ec;border-radius:7px;font:inherit;color:var(--ink);background:#fff;outline:none}.field input:focus{border-color:var(--blue);box-shadow:0 0 0 3px #3165df18}
+.remember{display:flex;align-items:center;gap:8px;font-size:12px;color:#62738a;cursor:pointer;margin:3px 0 22px;font-weight:400}.remember input{appearance:auto;accent-color:var(--blue);width:16px;height:16px;min-width:16px;min-height:16px;flex:0 0 16px;margin:0;padding:0;cursor:pointer}.remember input:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+.submit{width:100%;height:44px;border:0;border-radius:7px;background:var(--blue);color:#fff;font:600 14px "Microsoft YaHei UI",sans-serif;cursor:pointer}.submit:hover{background:#2857c7}
+.foot{text-align:center;font-size:12px;color:var(--muted);margin:22px 0 0}.error{border:1px solid #f4ceca;border-radius:7px;padding:10px 12px;background:#fff3f1;color:#ad4c43;font-size:13px;margin-bottom:18px}.local-note{font-size:11px;color:#929daf;margin:10px 0 0;text-align:center}
+.footer{text-align:center;color:#72839c;font-size:11px;padding:14px 20px;background:#fffffff0}
+@media(min-width:1600px){.scene-space{min-height:350px}}
+@media(max-width:1000px) and (min-width:721px){.layout{padding:30px 4% 22px;gap:4%;grid-template-columns:minmax(0,1fr) minmax(300px,.88fr)}.intro h1{font-size:29px;letter-spacing:0}.intro p{font-size:12px}.card{padding:26px}.intro-details{padding:12px}.tags{gap:8px 12px;font-size:11px}.scene-space{min-height:250px}}
+@media(max-height:740px) and (min-width:721px){.header{min-height:64px;padding-top:12px;padding-bottom:12px}.layout{min-height:calc(100svh - 110px);padding-top:20px;padding-bottom:20px}.intro h1{font-size:30px;margin:10px 0}.intro p{font-size:12px}.scene-space{min-height:190px}.intro-details{padding:10px 15px}.partners{margin-top:8px;padding-top:8px}.card{padding:25px}.subtitle{margin-bottom:20px}}
+@media(max-width:720px){.header{min-height:64px;padding:12px 20px;gap:9px;flex-wrap:wrap}.header strong{font-size:19px}.header-subtitle{font-size:11px;padding-left:9px}.motion-toggle{font-size:10px;padding:5px 8px}.layout{grid-template-columns:1fr;gap:24px;padding:20px 22px 30px;min-height:calc(100svh - 110px)}.intro{width:100%;max-width:440px;justify-self:center}.eyebrow{font-size:10px;letter-spacing:3px}.intro h1{font-size:clamp(24px,6vw,32px);margin:8px 0;letter-spacing:0}.intro p{font-size:12px}.scene-space{min-height:210px}.card{max-width:440px;justify-self:center;padding:26px}.campus-art{height:600px;object-position:28% center}.campus-backdrop{background:#eef5fc}.campus-backdrop::after{height:300px;background:linear-gradient(#fff9,#fff4,transparent)}.branch{width:340px;right:-120px;top:-20px;opacity:.8}.branch-near{display:none}.cloud{top:170px;left:30%;width:220px;height:70px}.cloud-two{display:none}.intro-details{padding:12px 16px}.partners{gap:28px}.leaf{animation-duration:24s}.footer{background:#f8fbfe}}
+@media(prefers-reduced-motion:reduce){.cloud,.branch,.leaf{animation:none!important}.leaf{display:none}}
