@@ -99,15 +99,14 @@ export default function Home(){
   </div>
  </TabsContent>}
  <TabsContent value="account" className="page account-page"><form className="account-form" onSubmit={saveAccount}>
-  <div className="account-intro"><div><span className="account-eyebrow">ACCOUNT SETTINGS</span><h2>用户中心</h2><p>管理个人资料与登录安全设置</p></div><span className="account-intro-icon"><UserRound size={25}/></span></div>
   <div className="account-grid">
    <section className="account-profile"><div className="account-avatar">{(displayName||account?.username||user||'用').slice(0,1).toUpperCase()}</div><div className="account-profile-copy"><span>当前账号</span><strong>{displayName||account?.username||user||'—'}</strong><small>{account?.username||user||'—'}</small></div><span className="role-badge">{account?.role==='superadmin'?'超级管理员':'普通用户'}</span><div className="account-profile-note"><ShieldCheck size={16}/><span>账号信息仅用于识别当前登录用户</span></div></section>
    <div className="account-settings">
     <section className="panel account-section"><div className="account-section-head"><span className="account-section-icon"><UserRound size={17}/></span><div><h3>个人资料</h3><p>设置在系统中显示的姓名</p></div></div><div className="account-section-body"><div className="account-summary"><span>登录账号</span><strong>{account?.username||user||'—'}</strong></div><Field label="姓名"><input maxLength={80} value={displayName} onChange={e=>setDisplayName(e.target.value)} placeholder="填写姓名（可选）"/></Field></div></section>
     <section className="panel account-section"><div className="account-section-head"><span className="account-section-icon security"><KeyRound size={17}/></span><div><h3>账号安全</h3><p>定期更新密码，保护账号安全</p></div></div><div className="account-section-body"><Field label="原密码"><input type="password" autoComplete="current-password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} placeholder="修改密码时填写"/></Field><Field label="新密码"><input type="password" autoComplete="new-password" minLength={8} value={newPassword} onChange={e=>setNewPassword(e.target.value)} placeholder="至少 8 位，留空则不修改"/></Field></div></section>
-    <div className="account-save"><span>修改完成后记得保存</span><button className="primary" disabled={busy}>{busy?'正在保存…':'保存个人资料'}</button></div>
    </div>
   </div>
+  <div className="account-save"><span>修改完成后记得保存</span><button className="primary" disabled={busy}>{busy?'正在保存…':'保存个人资料'}</button></div>
  </form></TabsContent>
  </main><footer className="statusbar"><span>绍兴数知 · 学校文印服务</span><span>{connected?'数据自动同步':'暂时无法连接云端，请检查网络'}</span></footer>
  <div className="toast-region" role="status" aria-live="polite" aria-atomic="true">{notification.text&&<div className="toast" key={notification.id}><Info size={18}/><span>{notification.text}</span><button aria-label="关闭提示" onClick={()=>notify('')}><X size={16}/></button></div>}</div>
