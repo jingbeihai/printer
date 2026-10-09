@@ -51,6 +51,7 @@ class StationRuntime:
             config.LOCAL_DB = config.DATA_DIR / "local.db"
             config.ensure_dirs()
             db.init(config.LOCAL_DB, db.LOCAL_SCHEMA)
+            importer.finalize_completed_pickup_tasks()
             self.executor = Executor(backend=WindowsBackend(), syncer=None)
             self.executor.start()
 
@@ -174,7 +175,8 @@ class StationRuntime:
             db.log_event('TASK_CONTROL', action, task_id=task['id'])
             return ('已停止后续下发；已进入打印机缓存的页面可能继续出纸' if action!='resume' and active and not matched else '')
 
-    def resolve_class_group(self, cloud_id, group_id, action, confirm_stopped=False):
+    def resolve_class_group(self, cloud_id, group_id, action, confirm_stopped=False,
+                            confirm_unmatched=False):
         if action not in ('recover', 'complete', 'retry'):
             raise ValueError("不支持的班级作业处理方式")
         with self.print_lock, self.executor.control_lock:
@@ -199,18 +201,59 @@ class StationRuntime:
                 db.execute("UPDATE groups SET status='DONE',done_at=? WHERE id=?", (time.time(), group_id))
                 db.log_event("CLASS_MARKED_DONE", f"人工确认{group['label']}已完成", printer_id=printer['id'], group_id=group_id, task_id=task['id'])
                 importer.on_group_done(group_id)
+                finished = db.one("SELECT status FROM local_tasks WHERE id=?", (task['id'],))
+                if finished and finished['status'] == 'DONE' and self.syncer:
+                    threading.Thread(target=self.syncer.tick, daemon=True).start()
                 return "已记录该班级完成"
             if action == 'retry':
+                manual_unmatched = False
                 if group['started_at'] is None:
                     raise ValueError("该班级尚未提交，请使用恢复操作")
                 if not confirm_stopped:
-                    raise ValueError("请先确认 Windows 队列中的旧作业已停止，并确认废弃已出纸张")
+                    raise ValueError("请先确认废弃本班已出纸张，再检查并停止旧作业")
                 try:
-                    matched = self.executor.backend.control_group(dict(printer), group['composed_path'], 'cancel')
+                    queue = self.executor.backend.inspect_group_jobs(dict(printer), group['composed_path'])
                 except Exception as exc:
-                    raise ValueError(f"无法确认旧作业已停止：{exc}") from exc
-                if not matched:
-                    raise ValueError("未能精确匹配并停止旧作业；请在 Windows 队列处理后重试")
+                    raise ValueError(f"无法读取 Windows 队列：{exc}") from exc
+                if queue['matching_job_ids']:
+                    try:
+                        matched = self.executor.backend.control_group(dict(printer), group['composed_path'], 'cancel')
+                    except Exception as exc:
+                        raise ValueError(f"无法停止精确匹配的旧作业：{exc}") from exc
+                    if not matched:
+                        raise ValueError("旧作业尚未确认停止，请稍后检查 Windows 队列")
+                    for attempt in range(4):
+                        try:
+                            queue = self.executor.backend.inspect_group_jobs(dict(printer), group['composed_path'])
+                        except Exception as exc:
+                            raise ValueError(f"无法复查 Windows 队列：{exc}") from exc
+                        if not queue['matching_job_ids']:
+                            break
+                        if attempt < 3:
+                            time.sleep(0.2)
+                    if queue['matching_job_ids']:
+                        raise ValueError("旧作业仍在 Windows 队列中，请稍后重试或人工处理")
+                    db.log_event("CLASS_OLD_JOB_CANCELED", f"仅取消精确匹配的{group['label']}旧作业",
+                                 printer_id=printer['id'], group_id=group_id, task_id=task['id'])
+                else:
+                    if queue['queue_count']:
+                        raise ValueError(f"未能精确匹配旧作业；Windows 队列还有{queue['queue_count']}个作业。请人工核对，等待队列清空，不会取消其他作业")
+                    if not confirm_unmatched:
+                        raise ValueError("未能精确匹配旧作业；队列已空且设备空闲。请人工核对本班出纸及旧作业已停止，再确认整班重打")
+                    manual_unmatched = True
+                try:
+                    queue = self.executor.backend.inspect_group_jobs(dict(printer), group['composed_path'])
+                    status = self.executor.backend.poll(dict(printer)).get('status')
+                except Exception as exc:
+                    raise ValueError(f"无法复查原打印机状态：{exc}") from exc
+                if queue['queue_count']:
+                    raise ValueError("Windows 队列尚有作业，请等待清空后再恢复本班，不会取消其他作业")
+                if status != 'idle':
+                    raise ValueError("原打印机尚未空闲，请处理设备后重试")
+                if manual_unmatched:
+                    db.log_event("CLASS_RETRY_UNMATCHED_MANUAL",
+                                 f"人工确认{group['label']}旧作业不在队列、废弃已出纸张并重打",
+                                 printer_id=printer['id'], group_id=group_id, task_id=task['id'])
             db.execute("UPDATE groups SET status='QUEUED',started_at=NULL,start_counter=NULL WHERE id=?", (group_id,))
             db.execute("UPDATE printers SET state='IDLE' WHERE id=?", (printer['id'],))
             db.log_event("CLASS_RELEASED", f"人工将{group['label']}留在原打印机重新派发({action})", printer_id=printer['id'], group_id=group_id, task_id=task['id'])

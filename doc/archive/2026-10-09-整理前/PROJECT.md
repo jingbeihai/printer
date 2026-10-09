@@ -1,6 +1,6 @@
 # CHAT-01 | PROJECT
 
-> 更新：2026-10-08。本文依据当前工作区源码梳理，描述当前实现，不代表生产环境或真机已验收。历史方案见 [归档](archive/开发文档-历史设计.md)。
+> 更新：2026-10-08。本文依据当前工作区源码梳理，描述当前实现，不代表生产环境或真机已验收。历史方案见 [归档](../开发文档-历史设计.md)。
 
 ## 1. 总体架构
 
@@ -48,9 +48,9 @@ WindowsBackend 是正式桌面端唯一打印后端。
 |---|---|
 | app/server_web.py | 云端 FastAPI：账号、学校预设、任务、上传、领取、退役页面重定向与文件留存 |
 | app/desktop.py、app/desktop_web.py | 桌面窗口和本地服务生命周期、登录转发、云端 API 代理、本机打印接口 |
-| app/station_runtime.py | StationRuntime：会话绑定、打印机绑定、任务打印请求、整任务控制及取件 |
+| app/station_runtime.py | StationRuntime：会话绑定、打印机绑定、任务打印请求、整任务控制及异常班级人工处置；历史取件状态兼容 |
 | app/cloudclient.py | CloudSync：周期同步、PDF 下载缓存、任务领取与释放请求 |
-| app/importer.py、app/compose.py | 当前班级作业创建、逐份双面补白、PDF 合成、取件状态 |
+| app/importer.py、app/compose.py | 当前班级作业创建、逐份双面补白、PDF 合成；全部班级完成后直接结束任务 |
 | app/executor.py | 后台调度循环、打印机轮询、完成判定、故障处理、连续运行与休息管理 |
 | app/backends.py | Windows 打印队列提交与控制，SNMP 状态读取辅助 |
 | app/db.py、app/models.py | 数据访问、当前 schema 创建与只读结构核验、状态枚举 |
@@ -93,7 +93,7 @@ Windows 印务台默认使用用户目录中的 station/local.db。主要表为 
 | POST /api/agent/sync | 正式客户端通过会话 Cookie 与 client_id 回传任务状态、接收排队任务/取消/优先级 |
 | GET /api/agent/file/{tid} | 正式客户端会话下载原稿，COS 模式可重定向到签名下载地址；独立 Token 不可访问 |
 | /desktop/printers、/desktop/printers/available | 本机绑定和可用 Windows 队列 |
-| /desktop/tasks/{tid}/print、/pickup、/control | 本机发起打印、取件和任务控制 |
+| /desktop/tasks/{tid}/print、/pickup、/control | 本机发起打印、历史取件状态兼容和任务控制 |
 | GET /desktop/fleet | 本机机队任务视图 |
 
 最后三类由本地网关提供；普通网页不负责操作用户电脑的打印队列。
@@ -107,9 +107,9 @@ Windows 印务台默认使用用户目录中的 station/local.db。主要表为 
 5. 正式桌面用户选机点击打印。本地检查任务元数据；若尚无本地任务，先下载原稿并按班级数生成每班独立 PDF，再请求云端 claim。旧模型本地任务不会自动转换或下发；界面提示取消旧任务并重新提交。实际顺序是“本地准备 → 云端领取 → 启用派发”。
 6. 云端通过条件 UPDATE 将未领取的排队任务绑定到 claimed_client_id，避免多个桌面客户端同时领取。同一客户端的排队任务领取可幂等返回；领取成功后本地才启用实际派发。
 7. 正式桌面端按稳定打印机顺序均分连续班级编号，保存班级到设备的分配后派发；每班完整交给一台设备。故障班级留在原设备等待人工处理，健康设备继续执行各自班级。
-8. CloudSync 周期回传 PRINTING、AWAITING_PICKUP、DONE、CANCELED；云端校验桌面客户端是否为领取方。用户确认取件后，本地更新状态并触发同步。
+8. 全部班级完成后，本地任务直接记为 DONE 并触发 CloudSync 同步；云端校验桌面客户端是否为领取方。异常班级由人确认完成或整班重打；历史 AWAITING_PICKUP 状态在本地启动时核对班级完成情况后关闭。
 
-常规状态链为 QUEUED → PRINTING → AWAITING_PICKUP → DONE，另有 CANCELED；UPLOADING 是上传过程的中间状态。
+常规状态链为 QUEUED → PRINTING → DONE，另有 CANCELED；UPLOADING 是上传过程的中间状态。AWAITING_PICKUP 仅为历史兼容状态。
 
 默认本地轮询间隔 2 秒、云同步间隔 30 秒。桌面模式将同步放入独立线程以避免网络请求直接阻塞调度。同步失败记录 last_error 并在后续周期重试；已准备且已启用的本地任务可以继续调度。不要据此推断存在完整离线领取、到期租约回收或所有事件可靠补传机制。
 
@@ -117,7 +117,7 @@ Windows 印务台默认使用用户目录中的 station/local.db。主要表为 
 
 正式桌面端使用 pypdf 将某班全部副本拼成一个 PDF，不生成封面或程序间隔页；Windows 驱动每个 PDF 提交一份，长边双面、黑白。双面打印时奇数页原稿逐份补白，避免后一份首页落在前一份背面。每班是一个完整作业，不按 80 张安全线拆分。打印机间隔页由设备设置负责，程序不修改该设置。
 
-WindowsBackend 用 SumatraPDF 将合成文件按一份、长边双面、黑白提交到已安装的 Windows 队列。客户端不安装打印机驱动。暂停、恢复、取消通过合成文件名匹配本程序作业，不清空其他应用作业；无法准确匹配时提示人工处理。
+WindowsBackend 用 SumatraPDF 将合成文件按一份、长边双面、黑白提交到已安装的 Windows 队列。客户端不安装打印机驱动。暂停、恢复、取消通过合成文件名匹配本程序作业，不清空其他应用作业。异常班级整班重打时先检查原设备队列：匹配到旧作业只取消该作业；未匹配且队列有其他作业则阻塞；未匹配但队列为空、设备空闲时，需人工二次确认并复查后重派原班。
 
 设备状态包括 OFFLINE、IDLE、PRINTING、WAIT_PAPER、SUSPECT、QUARANTINED、RESTING、MAINTENANCE。状态来源优先尝试 SNMP，再使用后端队列信息。完成判定涉及回空闲、稳定等待及可用的计数信息；系统队列结束不能当作真机出纸绝对可靠的证明。
 
@@ -144,7 +144,7 @@ WindowsBackend 用 SumatraPDF 将合成文件按一份、长边双面、黑白�
 
 前端在 prototype 内执行 npm run build，产物 prototype/dist/client 复制至 app/static/desk。build_exe.ps1 自动完成构建、资源复制、依赖安装、SumatraPDF 准备及 PyInstaller 打包；分发完整输出目录，不能仅移动 EXE。
 
-unittest 覆盖账号权限与旧角色不提权、上传/COS 降级、桌面网关、缓存与领取互斥、旧任务阻断、按班级合成、固定多机分配、故障阻塞、schema 核验和 Windows 作业精确控制。2026-10-08 `python -m unittest discover -s tests`：48 项通过。`prototype` 下 `npx tsc --noEmit` 通过。`npm run build` 完成编译与 2 条静态路线预渲染，但 Node 在 Windows 退出阶段触发 `uv_async` 断言并返回 1；构建不记为通过。生成的客户端静态文件已同步到 `app/static/desk`。没有运行真实打印、桌面客户端或生产数据库。
+unittest 覆盖账号权限与旧角色不提权、上传/COS 降级、桌面网关、缓存与领取互斥、旧任务阻断、按班级合成、固定多机分配、故障阻塞、直接完成任务、异常重打的队列核对、schema 核验和 Windows 作业精确控制。2026-10-08 `python -m unittest discover -s tests`：53 项通过。`prototype` 下 `npx tsc --noEmit` 通过。`npm run build` 完成编译与 2 条静态路线预渲染，但 Node 在 Windows 退出阶段触发 `uv_async` 断言并返回 1；构建不记为通过。生成的客户端静态文件已同步到 `app/static/desk`。没有运行真实打印、桌面客户端或生产数据库。
 
 ## 7. 与旧设计的主要区别
 

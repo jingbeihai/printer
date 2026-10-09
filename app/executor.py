@@ -202,6 +202,9 @@ class Executor:
         if fresh["continuous_print_seconds"] >= fresh["max_continuous_minutes"] * 60:
             self._start_rest(fresh)
         importer.on_group_done(gid)
+        finished = db.one("SELECT status FROM local_tasks WHERE id=?", (g['task_id'],))
+        if finished and finished['status'] == 'DONE' and self.syncer:
+            threading.Thread(target=self.syncer.tick, daemon=True).start()
 
     # ---------------- 故障转移 ----------------
     def _requeue_current(self, p: dict, reason: str):

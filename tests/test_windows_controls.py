@@ -4,6 +4,16 @@ from app.backends import WindowsBackend
 
 
 class WindowsControlTests(unittest.TestCase):
+    def test_inspection_reports_only_matching_job_without_changing_queue(self):
+        win = Mock()
+        win.EnumJobs.return_value = [{'JobId': 12, 'pDocument': 'task50_class0001.pdf'},
+                                     {'JobId': 13, 'pDocument': 'other.pdf'}]
+        with patch.dict('sys.modules', {'win32print': win}):
+            result = WindowsBackend().inspect_group_jobs(
+                {'queue_name': 'printer'}, r'C:\data\task50_class0001.pdf')
+        self.assertEqual(result, {'matching_job_ids': [12], 'queue_count': 2})
+        win.SetJob.assert_not_called()
+
     def test_only_matching_document_is_controlled(self):
         win = Mock(JOB_CONTROL_PAUSE=1, JOB_CONTROL_RESUME=2, JOB_CONTROL_DELETE=5)
         win.EnumJobs.return_value = [{'JobId': 12, 'pDocument': 'task50_g001.pdf'},

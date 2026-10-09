@@ -70,6 +70,32 @@ class ClassJobTests(unittest.TestCase):
                                        meta={'classes': 3, 'copies_per_class': 4},
                                        )
 
+    def test_last_completed_class_finishes_task_without_pickup_confirmation(self):
+        tid = importer.create_local_task(903, '数学', self.pdf, 2,
+                                         meta={'classes': 2, 'copies_per_class': 1})
+        db.execute("UPDATE local_tasks SET status='PRINTING',print_requested=1 WHERE id=?", (tid,))
+        groups = db.q('SELECT id FROM groups WHERE task_id=? ORDER BY seq', (tid,))
+        db.execute("UPDATE groups SET status='DONE' WHERE id=?", (groups[0]['id'],))
+        importer.on_group_done(groups[0]['id'])
+        self.assertEqual(db.one('SELECT status FROM local_tasks WHERE id=?', (tid,))['status'], 'PRINTING')
+        db.execute("UPDATE groups SET status='DONE' WHERE id=?", (groups[1]['id'],))
+        importer.on_group_done(groups[1]['id'])
+        importer.on_group_done(groups[1]['id'])
+        task = db.one('SELECT status,done_at FROM local_tasks WHERE id=?', (tid,))
+        self.assertEqual(task['status'], 'DONE')
+        self.assertIsNotNone(task['done_at'])
+        self.assertEqual(db.one("SELECT COUNT(*) n FROM events WHERE task_id=? AND type='TASK_DONE'", (tid,))['n'], 1)
+
+    def test_existing_finished_pickup_task_is_closed_without_reprinting(self):
+        tid = importer.create_local_task(904, '旧待收纸', self.pdf, 1,
+                                         meta={'classes': 1, 'copies_per_class': 1})
+        db.execute("UPDATE local_tasks SET status='AWAITING_PICKUP' WHERE id=?", (tid,))
+        db.execute("UPDATE groups SET status='DONE' WHERE task_id=?", (tid,))
+        importer.finalize_completed_pickup_tasks()
+        task = db.one('SELECT status,done_at FROM local_tasks WHERE id=?', (tid,))
+        self.assertEqual(task['status'], 'DONE')
+        self.assertIsNotNone(task['done_at'])
+
     def test_unstarted_legacy_task_is_rejected_without_mutation(self):
         tid = db.execute("INSERT INTO local_tasks(cloud_id,title,meta_json,copies,pages,pdf_path,status,created_at,job_model) "
                          "VALUES(902,'old','{}',6,3,?,'QUEUED',0,'legacy')", (str(self.pdf),))

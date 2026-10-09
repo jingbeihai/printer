@@ -214,7 +214,8 @@ def create_desktop_app(cloud_url: str, station=None) -> FastAPI:
         body = await request.json()
         try:
             message = await run_in_threadpool(station.resolve_class_group, tid, gid,
-                                              body.get('action'), bool(body.get('confirm_stopped')))
+                                              body.get('action'), bool(body.get('confirm_stopped')),
+                                              bool(body.get('confirm_unmatched')))
         except (ValueError, RuntimeError, OSError) as exc:
             return local_failure(exc)
         return {'ok': True, 'message': message or ''}

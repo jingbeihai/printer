@@ -81,6 +81,20 @@ def _snmp_status(ip: str):
 class WindowsBackend(BackendBase):
     name = "windows"
 
+    def inspect_group_jobs(self, printer, pdf_path):
+        """Read this class job and total queue size without changing any job."""
+        import win32print
+        from pathlib import PureWindowsPath
+        expected = PureWindowsPath(pdf_path).name.casefold()
+        handle = win32print.OpenPrinter(printer['queue_name'])
+        try:
+            jobs = win32print.EnumJobs(handle, 0, 9999, 1)
+            matched = [job['JobId'] for job in jobs
+                       if PureWindowsPath(job.get('pDocument') or '').name.casefold() == expected]
+            return {'matching_job_ids': matched, 'queue_count': len(jobs)}
+        finally:
+            win32print.ClosePrinter(handle)
+
     def control_group(self, printer, pdf_path, action):
         """只操作本程序对应文件的作业，不清空其他应用的打印作业。"""
         import win32print

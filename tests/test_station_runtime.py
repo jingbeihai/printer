@@ -130,6 +130,11 @@ class StationRuntimeTests(unittest.TestCase):
         backend = Mock()
         backend.poll.return_value = {'status': 'idle', 'page_counter': -1}
         backend.control_group.return_value = 1
+        backend.inspect_group_jobs.side_effect = [
+            {'matching_job_ids': [17], 'queue_count': 1},
+            {'matching_job_ids': [], 'queue_count': 0},
+            {'matching_job_ids': [], 'queue_count': 0},
+        ]
         self.station.executor = Executor(backend=backend)
         pid = db.execute("INSERT INTO printers(name,queue_name,state) VALUES('original','q','OFFLINE')")
         tid = db.execute("INSERT INTO local_tasks(cloud_id,title,meta_json,copies,pages,pdf_path,status,created_at,print_requested,printer_ids,job_model) "
@@ -140,11 +145,49 @@ class StationRuntimeTests(unittest.TestCase):
                                "VALUES(?,2,'第 2 班','test.pdf',1,1,1,'uncertain.pdf','PAUSED',?,1)", (tid, pid))
         self.station.resolve_class_group(82, waiting, 'recover')
         self.assertEqual(db.one("SELECT status,printer_id FROM groups WHERE id=?", (waiting,))['status'], 'QUEUED')
-        with self.assertRaisesRegex(ValueError, '确认 Windows 队列'):
+        with self.assertRaisesRegex(ValueError, '确认废弃本班已出纸张'):
             self.station.resolve_class_group(82, uncertain, 'retry')
         self.station.resolve_class_group(82, uncertain, 'retry', True)
         self.assertEqual(db.one("SELECT status,printer_id,started_at FROM groups WHERE id=?", (uncertain,))['status'], 'QUEUED')
         backend.control_group.assert_called_once_with(dict(db.one('SELECT * FROM printers WHERE id=?', (pid,))), 'uncertain.pdf', 'cancel')
+
+    def test_unmatched_old_job_needs_empty_queue_and_second_manual_confirmation(self):
+        from app.executor import Executor
+        backend = Mock()
+        backend.poll.return_value = {'status': 'idle', 'page_counter': -1}
+        backend.inspect_group_jobs.return_value = {'matching_job_ids': [], 'queue_count': 1}
+        self.station.executor = Executor(backend=backend)
+        pid = db.execute("INSERT INTO printers(name,queue_name,state) VALUES('original','q','IDLE')")
+        tid = db.execute("INSERT INTO local_tasks(cloud_id,title,copies,pages,pdf_path,status,created_at,print_requested,printer_ids,job_model) "
+                         "VALUES(83,'class',1,1,'test.pdf','PRINTING',0,1,?,'class')", (json.dumps([pid]),))
+        gid = db.execute("INSERT INTO groups(task_id,seq,label,pdf_path,pages,copies,sheets,composed_path,status,printer_id,started_at) "
+                         "VALUES(?,1,'第 1 班','test.pdf',1,1,1,'class.pdf','PAUSED',?,1)", (tid, pid))
+        with self.assertRaisesRegex(ValueError, '队列还有1个作业'):
+            self.station.resolve_class_group(83, gid, 'retry', True, True)
+        self.assertEqual(db.one('SELECT status FROM groups WHERE id=?', (gid,))['status'], 'PAUSED')
+        backend.control_group.assert_not_called()
+        backend.inspect_group_jobs.return_value = {'matching_job_ids': [], 'queue_count': 0}
+        with self.assertRaisesRegex(ValueError, '队列已空且设备空闲'):
+            self.station.resolve_class_group(83, gid, 'retry', True)
+        self.station.resolve_class_group(83, gid, 'retry', True, True)
+        self.assertEqual(db.one('SELECT status,printer_id FROM groups WHERE id=?', (gid,))['status'], 'QUEUED')
+        backend.control_group.assert_not_called()
+        self.assertEqual(db.one("SELECT COUNT(*) n FROM events WHERE type='CLASS_RETRY_UNMATCHED_MANUAL'")['n'], 1)
+
+    def test_manual_completion_of_last_class_finishes_task_without_pickup(self):
+        from app.executor import Executor
+        backend = Mock()
+        backend.poll.return_value = {'status': 'idle', 'page_counter': -1}
+        self.station.executor = Executor(backend=backend)
+        pid = db.execute("INSERT INTO printers(name,queue_name,state) VALUES('original','q','IDLE')")
+        tid = db.execute("INSERT INTO local_tasks(cloud_id,title,copies,pages,pdf_path,status,created_at,print_requested,printer_ids,job_model) "
+                         "VALUES(84,'class',1,1,'test.pdf','PRINTING',0,1,?,'class')", (json.dumps([pid]),))
+        gid = db.execute("INSERT INTO groups(task_id,seq,label,pdf_path,pages,copies,sheets,composed_path,status,printer_id,started_at) "
+                         "VALUES(?,1,'第 1 班','test.pdf',1,1,1,'class.pdf','PAUSED',?,1)", (tid, pid))
+        self.station.resolve_class_group(84, gid, 'complete')
+        task = db.one('SELECT status,done_at FROM local_tasks WHERE id=?', (tid,))
+        self.assertEqual(task['status'], 'DONE')
+        self.assertIsNotNone(task['done_at'])
 
     def test_stuck_task_does_not_block_other_printer(self):
         from app.executor import Executor

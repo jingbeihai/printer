@@ -94,7 +94,7 @@ export const addPrinter=(input:{name:string;queue:string;ip:string})=>localReque
 export const deletePrinter=(id:number)=>localRequest(`/desktop/printers/${id}`,{method:"DELETE"});
 export const loadFleet=async()=> (await localRequest('/desktop/fleet')).tasks||[];
 export const controlFleetTask=(id:number,action:'pause'|'resume'|'cancel'|'up'|'down',printer_id?:number)=>localRequest(`/desktop/tasks/${id}/control`,jsonPost({action,printer_id}));
-export const resolveFleetClass=(id:number,groupId:number,action:'recover'|'complete'|'retry',confirm_stopped=false)=>localRequest(`/desktop/tasks/${id}/classes/${groupId}/resolve`,jsonPost({action,confirm_stopped}));
+export const resolveFleetClass=(id:number,groupId:number,action:'recover'|'complete'|'retry',confirm_stopped=false,confirm_unmatched=false)=>localRequest(`/desktop/tasks/${id}/classes/${groupId}/resolve`,jsonPost({action,confirm_stopped,confirm_unmatched}));
 export const printTask=(id:number,printerIds:number[])=>localRequest(`/desktop/tasks/${id}/print`,jsonPost({printer_ids:printerIds}));
 export const confirmPickup=(id:number)=>localRequest(`/desktop/tasks/${id}/pickup`,{method:"POST"});
 type UploadReply={ok:boolean;task_id?:number;storage_backend?:"local";upload_url?:string;error?:string};

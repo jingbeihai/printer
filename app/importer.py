@@ -84,8 +84,21 @@ def on_group_done(group_id: int):
                        (tid,))["c"]
     if remaining:
         return
-    db.execute("UPDATE local_tasks SET status='AWAITING_PICKUP' WHERE id=?", (tid,))
-    db.log_event("TASK_AWAITING_PICKUP", "全部小组完成,等待收纸确认", task_id=tid)
+    if db.update_count("UPDATE local_tasks SET status='DONE',done_at=? "
+                       "WHERE id=? AND status='PRINTING'", (time.time(), tid)):
+        db.log_event("TASK_DONE", "全部班级作业完成", task_id=tid)
+
+
+def finalize_completed_pickup_tasks():
+    """Close earlier class tasks whose groups had already all finished."""
+    for task in db.q("SELECT id FROM local_tasks WHERE status='AWAITING_PICKUP' AND job_model='class'"):
+        remaining = db.one("SELECT COUNT(*) c FROM groups WHERE task_id=? AND status!='DONE'",
+                           (task['id'],))['c']
+        total = db.one("SELECT COUNT(*) c FROM groups WHERE task_id=?", (task['id'],))['c']
+        if total and not remaining:
+            db.execute("UPDATE local_tasks SET status='DONE',done_at=COALESCE(done_at,?) WHERE id=?",
+                       (time.time(), task['id']))
+            db.log_event("TASK_DONE", "全部班级作业已完成，关闭旧待收纸状态", task_id=task['id'])
 
 
 def confirm_pickup(local_task_id: int) -> bool:

@@ -15,9 +15,9 @@ export function FleetPanel({devices,notify,onChange,onAdd,onDelete}:{devices:Dev
  }
  async function resolve(task:FleetTask,groupId:number,action:'recover'|'complete'|'retry'){
   if(busy)return;
-  const prompt=action==='complete'?'确认该班已完整打印并出纸？':action==='retry'?'确认 Windows 队列中的旧作业已停止，并废弃该班已出纸张后整班重打？':'确认原打印机故障已处理？';
+  const prompt=action==='complete'?'确认该班已完整打印并出纸？':action==='retry'?'已处理设备故障并核对本班出纸？系统只会取消可精确匹配的旧作业。确认废弃本班已出纸张并整班重打？':'确认原打印机故障已处理？';
   if(!window.confirm(prompt))return;
-  setBusy(true);try{const reply=await resolveFleetClass(task.id,groupId,action,action==='retry');notify(reply.message||'班级作业已更新');setTasks(await loadFleet());await onChange()}catch(e){notify(e instanceof Error?e.message:'班级作业处理失败')}finally{setBusy(false)}
+  setBusy(true);try{let reply;try{reply=await resolveFleetClass(task.id,groupId,action,action==='retry')}catch(e){if(action!=='retry'||!(e instanceof Error)||!e.message.includes('队列已空且设备空闲'))throw e;if(!window.confirm('未能精确匹配旧作业，Windows 队列已空且设备空闲。请确认旧作业不会继续出纸，并废弃本班任何已出纸张。仍要整班重新打印吗？')){notify('该班继续等待人工处理');return}reply=await resolveFleetClass(task.id,groupId,'retry',true,true)}notify(reply.message||'班级作业已更新');setTasks(await loadFleet());await onChange()}catch(e){notify(e instanceof Error?e.message:'班级作业处理失败')}finally{setBusy(false)}
  }
  const related=tasks.filter(t=>device&&t.printer_ids.includes(device.id));
  const current=related.filter(t=>t.active_printer_ids.includes(device?.id??-1));
