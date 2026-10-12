@@ -224,8 +224,6 @@ def create_app() -> FastAPI:
         user, error = api_user(req)
         if error:
             return error
-        if user["role"] != ROLE_SUPERADMIN:
-            return JSONResponse({"ok": False, "error": "仅超级管理员可维护学校"}, status_code=403)
         body = await req.json()
         school, grade = str(body.get("school", "")).strip(), str(body.get("grade", "")).strip()
         try:
@@ -244,8 +242,6 @@ def create_app() -> FastAPI:
         user, error = api_user(req)
         if error:
             return error
-        if user["role"] != ROLE_SUPERADMIN:
-            return JSONResponse({"ok": False, "error": "仅超级管理员可维护学校"}, status_code=403)
         body = await req.json()
         school, grade = str(body.get("school", "")).strip(), str(body.get("grade", "")).strip()
         try:
@@ -265,8 +261,6 @@ def create_app() -> FastAPI:
         user, error = api_user(req)
         if error:
             return error
-        if user["role"] != ROLE_SUPERADMIN:
-            return JSONResponse({"ok": False, "error": "仅超级管理员可维护学校"}, status_code=403)
         db.execute("DELETE FROM school_presets WHERE id=?", (sid,))
         return api_snapshot(req)
 
