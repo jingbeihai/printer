@@ -1,22 +1,2 @@
-{% extends "base.html" %}{% block title %}注册 · 打印任务中心{% endblock %}
-{% block body %}
-<section class="auth-shell">
-  <div class="card auth-card">
-    <div class="auth-top">
-      <div class="eyebrow">Team Access</div>
-      <h1>注册公司账号</h1>
-      <p>填写公司邀请码后注册，即可管理对接学校的打印任务。</p>
-    </div>
-    <div class="auth-body">
-      {% if error %}<div class="err">{{ error }}</div>{% endif %}
-      <form method="post">
-        <label>用户名<input name="username" autocomplete="username" placeholder="例如：王老师" required autofocus></label>
-        <label>密码<input name="password" type="password" autocomplete="new-password" minlength="8" placeholder="至少 8 位" required></label>
-        <label>公司邀请码<input name="invite" autocomplete="one-time-code" spellcheck="false" placeholder="向超级管理员索取" value="{{ invite }}" required></label>
-        <button>注册账号</button>
-      </form>
-      <p class="muted auth-foot">已有账号？<a href="/login">返回登录</a></p>
-    </div>
-  </div>
-</section>
-{% endblock %}
+{% set register_mode = true %}
+{% include "login.html" %}

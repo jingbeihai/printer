@@ -100,10 +100,12 @@ def create_desktop_app(cloud_url: str, station=None) -> FastAPI:
 
     @app.api_route('/register', methods=['GET', 'POST'])
     async def register(request: Request):
+        if request.method == 'GET':
+            return render('register.html', error='', invite=request.query_params.get('invite', ''))
         try:
             upstream = await forward(request, '/register')
         except requests.RequestException:
-            return render('login.html', error='无法连接云端，请检查网络后重试')
+            return render('register.html', error='无法连接云端，请检查网络后重试', invite='')
         if upstream.status_code in (302, 303):
             return transfer_cookie(upstream, RedirectResponse('/desk/', 303))
         return Response(upstream.content, status_code=upstream.status_code, media_type='text/html')
