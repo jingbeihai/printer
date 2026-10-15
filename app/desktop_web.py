@@ -1,6 +1,9 @@
 """正式桌面端：内置页面，同源转发到用户配置的云端服务。"""
 from http.cookies import SimpleCookie
 from pathlib import Path
+import threading
+import time
+import tempfile
 from urllib.parse import urlsplit
 
 import requests
@@ -12,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from .webcommon import render
 
 
-def create_desktop_app(cloud_url: str, station=None) -> FastAPI:
+def create_desktop_app(cloud_url: str, station=None, updater=None) -> FastAPI:
     cloud_url = cloud_url.rstrip('/')
     parsed = urlsplit(cloud_url)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
@@ -26,6 +29,9 @@ def create_desktop_app(cloud_url: str, station=None) -> FastAPI:
         origin = request.headers.get('origin')
         if origin and origin != str(request.base_url).rstrip('/'):
             return Response(status_code=403)
+        if (station is not None and getattr(station, 'update_blocked', False) is True and request.method not in ('GET', 'HEAD')
+                and request.url.path != '/desktop/update/install'):
+            return JSONResponse({'ok': False, 'error': '客户端正在更新，请稍后'}, status_code=503)
         response = await call_next(request)
         response.headers['Cache-Control'] = 'no-store'
         return response
@@ -169,6 +175,89 @@ def create_desktop_app(cloud_url: str, station=None) -> FastAPI:
         except (ValueError, RuntimeError, TypeError, requests.RequestException, OSError) as exc:
             return local_failure(exc)
         return {'ok': True}
+
+    @app.get('/desktop/update')
+    async def update_status(request: Request):
+        return {'ok': True, **updater.status()} if updater else {'ok': True, 'enabled': False}
+
+    def update_access(request: Request):
+        if not request.cookies.get('pc_session'):
+            return JSONResponse({'ok': False, 'error': '请先登录客户端'}, status_code=401)
+        return None
+
+    @app.post('/desktop/update/check')
+    async def update_check(request: Request):
+        error = update_access(request)
+        if error:
+            return error
+        try:
+            return {'ok': True, **(await run_in_threadpool(updater.check))}
+        except Exception as exc:
+            return local_failure(exc)
+
+    @app.post('/desktop/update/download')
+    async def update_download(request: Request):
+        error = update_access(request)
+        if error:
+            return error
+        try:
+            return await run_in_threadpool(updater.download)
+        except Exception as exc:
+            return local_failure(exc)
+
+    @app.post('/desktop/update/import')
+    async def update_import(request: Request):
+        error = update_access(request)
+        if error:
+            return error
+        if updater is None:
+            return JSONResponse({'ok': False, 'error': '更新服务不可用'}, status_code=503)
+        form = await request.form()
+        manifest_file, archive_file = form.get('manifest'), form.get('archive')
+        if not hasattr(manifest_file, 'read') or not hasattr(archive_file, 'read'):
+            return JSONResponse({'ok': False, 'error': '请选择清单 JSON 与升级 ZIP'}, status_code=400)
+        raw = await manifest_file.read(32769)
+        temporary = None
+        try:
+            folder = updater.data_dir / 'updates'
+            folder.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=folder, prefix='import-', suffix='.part', delete=False) as target:
+                temporary = Path(target.name)
+                total = 0
+                while chunk := await archive_file.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > 600 * 1024 * 1024:
+                        raise ValueError('离线包超过大小限制')
+                    target.write(chunk)
+            return {'ok': True, **(await run_in_threadpool(updater.import_offline, raw, temporary))}
+        except Exception as exc:
+            return local_failure(exc)
+        finally:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+
+    @app.post('/desktop/update/install')
+    async def update_install(request: Request):
+        error = update_access(request)
+        if error:
+            return error
+        prepared = False
+        try:
+            manifest, archive = await run_in_threadpool(updater.ready_install)
+            prepared = True
+            await run_in_threadpool(station.prepare_update)
+            await run_in_threadpool(updater.install, manifest, archive)
+            def close_window():
+                time.sleep(.5)
+                import webview
+                if webview.windows:
+                    webview.windows[0].destroy()
+            threading.Thread(target=close_window, daemon=True).start()
+            return {'ok': True, 'message': '客户端即将退出并安装新版'}
+        except Exception as exc:
+            if prepared:
+                await run_in_threadpool(station.cancel_update)
+            return local_failure(exc)
 
     @app.post('/desktop/tasks/{tid}/pickup')
     async def pickup_task(request: Request, tid: int):

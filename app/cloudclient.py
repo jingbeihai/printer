@@ -80,7 +80,7 @@ class CloudSync:
     def task_action(self, cloud_task_id: int, action: str):
         response = self._request(
             "POST", f"/api/v1/tasks/{cloud_task_id}/{action}",
-            json={"client_id": self.client_id}, timeout=20)
+            json={"client_id": self.client_id, "class_cover_v1": True}, timeout=20)
         if response.status_code == 404:
             raise RuntimeError("云端服务尚未更新打印领取接口")
         try:

@@ -84,6 +84,19 @@ class DesktopGatewayTests(unittest.TestCase):
         self.assertEqual(result.status_code, 403)
         request.assert_not_called()
 
+    def test_update_status_works_offline_but_changes_need_local_session(self):
+        updater = Mock()
+        updater.status.return_value = {'version': '0.1.0', 'enabled': True, 'update': None}
+        updater.check.return_value = {'version': '0.1.0', 'enabled': True, 'update': None}
+        with TestClient(create_desktop_app('https://cloud.example', updater=updater),
+                        base_url='http://127.0.0.1:18765') as client:
+            with patch('app.desktop_web.requests.Session.request') as cloud:
+                self.assertEqual(client.get('/desktop/update').json()['version'], '0.1.0')
+                self.assertEqual(client.post('/desktop/update/check').status_code, 401)
+                client.cookies.set('pc_session', 'local-cookie')
+                self.assertEqual(client.post('/desktop/update/check').status_code, 200)
+                cloud.assert_not_called()
+
     def test_delete_printer_requires_login_and_calls_station(self):
         station = Mock()
         with TestClient(create_desktop_app('https://cloud.example', station),

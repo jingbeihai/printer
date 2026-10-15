@@ -128,6 +128,20 @@ class CompanyAccountTests(unittest.TestCase):
             self.assertEqual(db.one('SELECT school FROM school_presets WHERE id=?', (sid,))['school'], '学校')
             self.assertEqual(len(db.q('SELECT * FROM school_presets')), 1)
 
+    def test_special_school_rules_validate_overlap_and_bounds(self):
+        payload = {'school': '实验学校', 'grade': '八年级', 'classes': 20, 'copies': 50,
+                   'special_copies': [{'classes': '6、10、15', 'copies': 40}]}
+        saved = self.client.post('/api/v1/schools', json=payload)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()['presets'][0]['special_copies'], payload['special_copies'])
+        for rules in ([{'classes': '6、10', 'copies': 40}, {'classes': '10', 'copies': 30}],
+                      [{'classes': '21', 'copies': 40}], [{'classes': '1-5', 'copies': 0}]):
+            with self.subTest(rules=rules):
+                self.assertEqual(self.client.post('/api/v1/schools', json=dict(payload,
+                    special_copies=rules)).status_code, 400)
+        self.assertEqual(self.client.get('/api/v1/bootstrap').json()['presets'][0]['special_copies'],
+                         payload['special_copies'])
+
     def test_old_roles_are_not_converted_or_promoted(self):
         db.execute("INSERT INTO users(username,pw_hash,role,created_at) VALUES(?,?,?,0)",
                    ('old-admin', hash_password('password-123'), 'admin'))

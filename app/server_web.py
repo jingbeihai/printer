@@ -19,6 +19,7 @@ from starlette.concurrency import run_in_threadpool
 
 from . import config, db, importer, storage
 from .compose import sheets_per_copy
+from .class_plan import expand_special_copies, validate_class_copies
 from .models import ROLE_SUPERADMIN, ROLE_USER, TASK_STATUS_CN, TaskStatus
 from .webcommon import hash_password, make_session, read_session, render, verify_password
 
@@ -112,6 +113,18 @@ def start_retention_thread():
 
 def create_app() -> FastAPI:
     app = FastAPI(title="打印集群·任务中心", docs_url=None, redoc_url=None)
+
+    @app.get("/updates/stable.json")
+    def client_update_manifest():
+        path = config.DATA_DIR / "releases" / "stable.json"
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return Response(status_code=404)
+        if len(raw) > 32768:
+            return Response(status_code=503)
+        return Response(raw, media_type="application/json",
+                        headers={"Cache-Control": "no-store"})
     ensure_defaults()
     cleanup_old_uploads()
     start_retention_thread()
@@ -162,8 +175,12 @@ def create_app() -> FastAPI:
 
     # ---------- 提交 ----------
     def school_presets():
-        return [dict(row) for row in
-                db.q("SELECT * FROM school_presets ORDER BY school, grade")]
+        result = []
+        for row in db.q("SELECT * FROM school_presets ORDER BY school, grade"):
+            preset = dict(row)
+            preset["special_copies"] = json.loads(preset.pop("overrides_json") or '[]')
+            result.append(preset)
+        return result
 
     # React 桌面界面使用这一组同源接口。旧的 Jinja 页面仍可访问，便于已打开的
     # 浏览器会话平滑过渡；新 EXE 不再以那些页面作为产品界面。
@@ -175,6 +192,8 @@ def create_app() -> FastAPI:
 
     def api_task(row):
         task = dict(row)
+        task["class_copies"] = json.loads(task.pop("class_copies_json") or '[]')
+        task["cover_enabled"] = bool(task["cover_enabled"])
         task["claimed"] = bool(task.pop("claimed_client_id", ""))
         task["copies_per_class"] = task.get("copies_per_class") or (
             max(1, task["copies"] // task["classes"]) if task["classes"] else task["copies"])
@@ -232,9 +251,15 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": "班级数和份数必须为整数"}, status_code=400)
         if not school or not grade or classes < 1 or copies < 1:
             return JSONResponse({"ok": False, "error": "请填写学校、年级、班级数和每班份数"}, status_code=400)
-        db.execute("INSERT INTO school_presets(school,grade,classes,copies) VALUES(?,?,?,?) "
-                   "ON CONFLICT(school,grade) DO UPDATE SET classes=excluded.classes,copies=excluded.copies",
-                   (school, grade, classes, copies))
+        rules = body.get("special_copies", [])
+        try:
+            expand_special_copies(classes, copies, rules)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        db.execute("INSERT INTO school_presets(school,grade,classes,copies,overrides_json) VALUES(?,?,?,?,?) "
+                   "ON CONFLICT(school,grade) DO UPDATE SET classes=excluded.classes,"
+                   "copies=excluded.copies,overrides_json=excluded.overrides_json",
+                   (school, grade, classes, copies, json.dumps(rules, ensure_ascii=False)))
         return api_snapshot(req)
 
     @app.put("/api/v1/schools/{sid}")
@@ -252,8 +277,13 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": "学校预设不存在"}, status_code=404)
         if not school or not grade or classes < 1 or copies < 1:
             return JSONResponse({"ok": False, "error": "请填写学校、年级、班级数和每班份数"}, status_code=400)
-        db.execute("UPDATE school_presets SET school=?,grade=?,classes=?,copies=? WHERE id=?",
-                   (school, grade, classes, copies, sid))
+        rules = body.get("special_copies", [])
+        try:
+            expand_special_copies(classes, copies, rules)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        db.execute("UPDATE school_presets SET school=?,grade=?,classes=?,copies=?,overrides_json=? WHERE id=?",
+                   (school, grade, classes, copies, json.dumps(rules, ensure_ascii=False), sid))
         return api_snapshot(req)
 
     @app.delete("/api/v1/schools/{sid}")
@@ -436,11 +466,17 @@ def create_app() -> FastAPI:
             client_id = str(uuid.UUID(str(body.get("client_id", ""))))
         except ValueError:
             return JSONResponse({"ok": False, "error": "客户端标识无效"}, status_code=400)
-        task = db.one("SELECT id,status,claimed_client_id FROM tasks WHERE id=?", (tid,))
+        task = db.one("SELECT id,status,claimed_client_id,cover_enabled,class_copies_json,"
+                      "copies_per_class FROM tasks WHERE id=?", (tid,))
         if not task:
             return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
         if task["status"] != "QUEUED":
             return JSONResponse({"ok": False, "error": "任务已经开始或结束"}, status_code=409)
+        plan = json.loads(task["class_copies_json"] or '[]')
+        needs_new_client = bool(task["cover_enabled"] or
+                                (plan and any(c != task["copies_per_class"] for c in plan)))
+        if needs_new_client and body.get("class_cover_v1") is not True:
+            return JSONResponse({"ok": False, "error": "请升级桌面客户端后打印此任务"}, status_code=409)
         if task["claimed_client_id"] == client_id:
             return {"ok": True}
         changed = db.update_count(
@@ -504,14 +540,24 @@ def create_app() -> FastAPI:
         if pages < 1 or pages > 100000 or file_size < 1 or file_size > 5 * 1024 ** 3:
             return JSONResponse({"ok": False, "error": "文件大小或原稿页数无效"}, status_code=400)
         title, filename_copies = importer.parse_filename(filename)
-        if filename_copies:
+        if filename_copies and body.get("class_copies") is None:
             copies_per_class = filename_copies
-        total_copies = classes * copies_per_class
+        try:
+            class_copies = validate_class_copies(classes, copies_per_class, body.get("class_copies"))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        cover_enabled = body.get("cover_enabled", False)
+        if not isinstance(cover_enabled, bool):
+            return JSONResponse({"ok": False, "error": "封面选项无效"}, status_code=400)
+        total_copies = sum(class_copies)
         tid = db.execute(
-            "INSERT INTO tasks(title,school,grade,classes,copies,copies_per_class,pages,sheets,note,"
-            "source_user,status,pdf_path,pdf_name,created_at) VALUES(?,?,?,?,?,?,?,?,'',?,'UPLOADING','',?,?)",
-            (title, school, grade, classes, total_copies, copies_per_class, pages,
-             sheets_per_copy(pages) * total_copies, user["username"], filename, time.time()))
+            "INSERT INTO tasks(title,school,grade,classes,copies,copies_per_class,class_copies_json,"
+            "cover_enabled,pages,sheets,note,source_user,status,pdf_path,pdf_name,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,'',?,'UPLOADING','',?,?)",
+            (title, school, grade, classes, total_copies, copies_per_class,
+             json.dumps(class_copies), int(cover_enabled), pages,
+             sheets_per_copy(pages) * total_copies + (classes if cover_enabled else 0),
+             user["username"], filename, time.time()))
         try:
             location, upload_url = storage.prepare_upload(tid, filename)
             db.execute("UPDATE tasks SET pdf_path=? WHERE id=?", (location, tid))
@@ -616,14 +662,26 @@ def create_app() -> FastAPI:
         if pages < 1 or pages > 100000:
             return JSONResponse({"ok": False, "error": "原稿页数无效"}, status_code=400)
         title, filename_copies = importer.parse_filename(upload.filename)
-        if filename_copies:
+        raw_copies = form.get("class_copies")
+        if filename_copies and raw_copies is None:
             copies_per_class = filename_copies
-        total_copies = classes * copies_per_class
+        try:
+            class_copies = validate_class_copies(
+                classes, copies_per_class, json.loads(raw_copies) if raw_copies is not None else None)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        cover_raw = form.get("cover_enabled", "false")
+        if cover_raw not in ("true", "false"):
+            return JSONResponse({"ok": False, "error": "封面选项无效"}, status_code=400)
+        cover_enabled = cover_raw == "true"
+        total_copies = sum(class_copies)
         tid = db.execute(
-            "INSERT INTO tasks(title,school,grade,classes,copies,copies_per_class,pages,sheets,note,"
-            "source_user,status,pdf_path,pdf_name,created_at) VALUES(?,?,?,?,?,?,?,?,'',?,'QUEUED','',?,?)",
-            (title, school, grade, classes, total_copies, copies_per_class, pages,
-             sheets_per_copy(pages) * total_copies,
+            "INSERT INTO tasks(title,school,grade,classes,copies,copies_per_class,class_copies_json,"
+            "cover_enabled,pages,sheets,note,source_user,status,pdf_path,pdf_name,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,'',?,'QUEUED','',?,?)",
+            (title, school, grade, classes, total_copies, copies_per_class,
+             json.dumps(class_copies), int(cover_enabled), pages,
+             sheets_per_copy(pages) * total_copies + (classes if cover_enabled else 0),
              user["username"], upload.filename, time.time()))
         path = save_upload_by_date(tid, upload, content)
         db.execute("UPDATE tasks SET pdf_path=? WHERE id=?", (path, tid))

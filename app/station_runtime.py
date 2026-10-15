@@ -28,6 +28,7 @@ class StationRuntime:
         self.syncer = None
         self.lock = threading.RLock()
         self.print_lock = threading.Lock()
+        self.update_blocked = False
         if not self.settings.get("client_id"):
             self.settings["client_id"] = str(uuid.uuid4())
             self.save_settings(self.settings)
@@ -51,12 +52,23 @@ class StationRuntime:
             config.LOCAL_DB = config.DATA_DIR / "local.db"
             config.ensure_dirs()
             db.init(config.LOCAL_DB, db.LOCAL_SCHEMA)
+            self._ensure_schema_version()
             importer.finalize_completed_pickup_tasks()
             self.executor = Executor(backend=WindowsBackend(), syncer=None)
             self.executor.start()
 
+    @staticmethod
+    def _ensure_schema_version():
+        version = db.one("PRAGMA user_version")[0]
+        if version not in (0, 1):
+            raise RuntimeError("本地数据库版本高于当前客户端，已停止启动")
+        if version == 0:
+            db.execute("PRAGMA user_version=1")
+
     def bind_session(self, cookie: str):
         with self.lock:
+            if self.update_blocked:
+                return
             if not self.enabled:
                 self.start()
             if cookie and (self.syncer is None or self.syncer.cookie != cookie):
@@ -133,7 +145,8 @@ class StationRuntime:
             task = db.one("SELECT * FROM local_tasks WHERE cloud_id=? AND print_requested=1", (cloud_id,))
             if not task or task['status'] in ('DONE','CANCELED'):
                 raise ValueError("本机任务不存在或已结束")
-            active = db.q("SELECT * FROM groups WHERE task_id=? AND status='PRINTING'", (task['id'],))
+            active = db.q("SELECT * FROM groups WHERE task_id=? AND "
+                          "(status='PRINTING' OR (status='PAUSED' AND started_at IS NOT NULL))", (task['id'],))
             if action in ('up','down'):
                 waiting = [t for t in self.fleet_tasks() if printer_id in t['printer_ids']
                            and not t['active_printer_ids'] and t['status'] != 'AWAITING_PICKUP']
@@ -255,6 +268,7 @@ class StationRuntime:
                                  f"人工确认{group['label']}旧作业不在队列、废弃已出纸张并重打",
                                  printer_id=printer['id'], group_id=group_id, task_id=task['id'])
             db.execute("UPDATE groups SET status='QUEUED',started_at=NULL,start_counter=NULL WHERE id=?", (group_id,))
+            db.execute('DELETE FROM config_kv WHERE key=?', (f'spool:{group_id}',))
             db.execute("UPDATE printers SET state='IDLE' WHERE id=?", (printer['id'],))
             db.log_event("CLASS_RELEASED", f"人工将{group['label']}留在原打印机重新派发({action})", printer_id=printer['id'], group_id=group_id, task_id=task['id'])
             return "该班级已保留在原打印机等待派发"
@@ -293,7 +307,70 @@ class StationRuntime:
 
     def request_print(self, cloud_task: dict, printer_ids: list[int]):
         with self.print_lock:
+            if self.update_blocked:
+                raise ValueError("客户端正在准备更新，暂不接收打印任务")
             return self._request_print_locked(cloud_task, printer_ids)
+
+    def prepare_update(self):
+        """Freeze dispatch only after all locally managed queues are provably idle."""
+        with self.print_lock, self.executor.control_lock:
+            if self.update_blocked:
+                raise ValueError("更新已在进行")
+            pending = db.one("SELECT COUNT(*) n FROM local_tasks WHERE print_requested=1 "
+                             "AND status NOT IN ('DONE','CANCELED')")['n']
+            pending_groups = db.one("SELECT COUNT(*) n FROM groups WHERE status IN ('PRINTING','PAUSED')")['n']
+            if pending or pending_groups:
+                raise ValueError("本机还有未完成或待确认的打印任务，请处理后更新")
+            for row in db.q("SELECT * FROM printers WHERE enabled=1"):
+                state = self.executor.backend.poll(dict(row))
+                jobs = state.get('jobs')
+                if state.get('status') != 'idle' or not isinstance(jobs, list) or any(
+                        not job.get('finished', False) for job in jobs):
+                    raise ValueError(f"打印机 {row['name']} 的状态或队列尚未确认空闲")
+            self.update_blocked = True
+            self.executor.stop()
+            if self.syncer:
+                self.syncer.deactivate()
+        if self.executor._thread:
+            self.executor._thread.join(timeout=15)
+            if self.executor._thread.is_alive():
+                raise RuntimeError("打印调度仍在运行，已阻止更新")
+        if self.executor._sync_thread:
+            self.executor._sync_thread.join(timeout=15)
+            if self.executor._sync_thread.is_alive():
+                raise RuntimeError("云端同步仍在运行，已阻止更新")
+        if self.syncer and not self.syncer._tick_lock.acquire(timeout=15):
+            raise RuntimeError("云端同步仍在运行，已阻止更新")
+        if self.syncer:
+            self.syncer._tick_lock.release()
+
+    def update_ready(self):
+        """UI preflight without changing station state."""
+        with self.print_lock, self.executor.control_lock:
+            pending = db.one("SELECT COUNT(*) n FROM local_tasks WHERE print_requested=1 "
+                             "AND status NOT IN ('DONE','CANCELED')")['n']
+            pending_groups = db.one("SELECT COUNT(*) n FROM groups WHERE status IN ('PRINTING','PAUSED')")['n']
+            if pending or pending_groups:
+                return False
+            for row in db.q("SELECT * FROM printers WHERE enabled=1"):
+                state = self.executor.backend.poll(dict(row))
+                jobs = state.get('jobs')
+                if state.get('status') != 'idle' or not isinstance(jobs, list) or any(
+                        not job.get('finished', False) for job in jobs):
+                    return False
+            return True
+
+    def cancel_update(self):
+        """Resume normal operation if handoff to the external updater fails."""
+        with self.print_lock, self.executor.control_lock:
+            if not self.update_blocked:
+                return
+            self.update_blocked = False
+            if self.syncer:
+                self.syncer._active = True
+            self.executor._stop.clear()
+            if self.executor._thread is None or not self.executor._thread.is_alive():
+                self.executor.start()
 
     def _request_print_locked(self, cloud_task: dict, printer_ids: list[int]):
         if not self.ready or not self.syncer:
@@ -314,11 +391,23 @@ class StationRuntime:
             raise ValueError("该任务已经开始或结束，不能重复打印")
         if task and task["print_requested"]:
             raise ValueError("该任务已加入本机打印队列，请等待前一任务收纸")
+        if task and bool(cloud_task.get('cover_enabled')) != bool(
+                json.loads(task['meta_json'] or '{}').get('cover_enabled')):
+            started = db.one("SELECT id FROM groups WHERE task_id=? AND "
+                             "(status!='QUEUED' OR started_at IS NOT NULL) LIMIT 1", (task['id'],))
+            if started:
+                raise ValueError("本地封面设置与云端任务不一致，已有班级开始打印")
+            # Older clients may have composed a coverless job before the cloud
+            # rejected its claim. Replace only this untouched local cache.
+            db.execute("DELETE FROM groups WHERE task_id=?", (task['id'],))
+            db.execute("DELETE FROM local_tasks WHERE id=?", (task['id'],))
+            task = None
         if not task:
             pdf_path = syncer._download(cloud_id, cloud_task["pdf_name"])
             meta = {key: cloud_task.get(key, "") for key in
-                    ("school", "grade", "classes", "copies_per_class", "note", "source_user")}
-            if not meta.get("copies_per_class") and meta.get("classes"):
+                    ("school", "grade", "classes", "copies_per_class", "class_copies",
+                     "cover_enabled", "pdf_name", "note", "source_user")}
+            if not meta.get("copies_per_class") and meta.get("classes") and not meta.get("class_copies"):
                 total = int(cloud_task.get("copies", 0))
                 classes = int(meta["classes"] or 0)
                 if classes < 1 or total % classes:
@@ -336,10 +425,18 @@ class StationRuntime:
         copies_per_class = int(cloud_task.get('copies_per_class') or task_meta.get('copies_per_class') or 0)
         if not copies_per_class and classes and total_copies % classes == 0:
             copies_per_class = total_copies // classes
-        if classes < 1 or copies_per_class < 1 or classes * copies_per_class != total_copies:
+        from .class_plan import validate_class_copies
+        plan = cloud_task.get('class_copies') or task_meta.get('class_copies') or None
+        try:
+            class_copies = validate_class_copies(classes, copies_per_class, plan)
+        except ValueError as exc:
+            raise ValueError("班级数或逐班份数无效，请重新提交任务") from exc
+        if sum(class_copies) != total_copies:
             raise ValueError("班级数、每班份数与总份数不完整或不一致，请重新提交任务")
+        if bool(cloud_task.get('cover_enabled')) != bool(task_meta.get('cover_enabled')):
+            raise ValueError("本地封面设置与云端任务不一致，请重新同步任务")
         groups = db.q("SELECT id,seq,copies FROM groups WHERE task_id=? ORDER BY seq", (task['id'],))
-        if len(groups) != classes or any(group['seq'] != index or group['copies'] != copies_per_class
+        if len(groups) != classes or any(group['seq'] != index or group['copies'] != class_copies[index - 1]
                                          for index, group in enumerate(groups, 1)):
             raise ValueError("本地班级作业数量或份数与云端任务不一致，请重新提交")
         ordered_printers = sorted(chosen, key=lambda pid: (str(db.one("SELECT name FROM printers WHERE id=?", (pid,))["name"]).lower(), pid))

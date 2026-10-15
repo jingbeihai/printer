@@ -1,4 +1,5 @@
 import io
+import json
 import tempfile
 import time
 import unittest
@@ -49,6 +50,44 @@ class UploadRegressionTests(unittest.TestCase):
         download = self.client.get(f"/api/agent/file/{task['id']}",
                                   headers={'X-Client-ID': str(uuid.uuid4())})
         self.assertEqual(download.content, pdf.getvalue())
+
+    def test_class_snapshot_and_cover_are_saved_for_local_and_cos_uploads(self):
+        db.execute("UPDATE school_presets SET classes=3,copies=50 WHERE school='School'")
+        plan = [50, 40, 50]
+        local_data = dict(self.meta, classes=3, copies=50,
+                          class_copies=json.dumps(plan), cover_enabled='true')
+        pdf = io.BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(width=595, height=842)
+        writer.write(pdf)
+        created = self.client.post('/api/v1/tasks', data=local_data,
+                                   files={'file': ('sample.pdf', pdf.getvalue(), 'application/pdf')})
+        self.assertEqual(created.status_code, 200, created.text)
+        task = db.one('SELECT * FROM tasks WHERE id=?', (created.json()['task_id'],))
+        self.assertEqual((task['copies'], task['sheets'], task['cover_enabled']), (140, 143, 1))
+        self.assertEqual(json.loads(task['class_copies_json']), plan)
+        snapshot = self.client.get('/api/v1/bootstrap').json()['tasks'][0]
+        self.assertEqual(snapshot['class_copies'], plan)
+        self.assertTrue(snapshot['cover_enabled'])
+        claim_path = f"/api/v1/tasks/{task['id']}/claim"
+        client_id = str(uuid.uuid4())
+        self.assertEqual(self.client.post(claim_path, json={'client_id': client_id}).status_code, 409)
+        self.assertEqual(self.client.post(claim_path, json={
+            'client_id': client_id, 'class_cover_v1': True}).status_code, 200)
+        db.execute("UPDATE school_presets SET classes=1,copies=1 WHERE school='School'")
+        self.assertEqual(self.client.get('/api/v1/bootstrap').json()['tasks'][0]['class_copies'], plan)
+        invalid = dict(local_data, class_copies=json.dumps([50, 40]))
+        self.assertEqual(self.client.post('/api/v1/tasks', data=invalid,
+            files={'file': ('sample.pdf', pdf.getvalue(), 'application/pdf')}).status_code, 400)
+        with patch.object(config, 'STORAGE_BACKEND', 'cos'), patch.object(
+                server_web.storage, 'prepare_upload', return_value=('cos://uploads/test.pdf', 'https://example.invalid/upload')):
+            prepared = self.client.post('/api/v1/uploads/presign', json=dict(self.meta,
+                classes=3, copies=50, class_copies=plan, cover_enabled=True))
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        cos_task = db.one('SELECT * FROM tasks WHERE id=?', (prepared.json()['task_id'],))
+        self.assertEqual(json.loads(cos_task['class_copies_json']), plan)
+        self.assertEqual((cos_task['copies'], cos_task['sheets'], cos_task['cover_enabled']),
+                         (140, 143, 1))
 
     def test_download_encodes_unicode_and_special_filename_characters(self):
         from urllib.parse import unquote

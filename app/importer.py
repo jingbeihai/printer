@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import config, db
 from .compose import compose_group_pdf, pdf_page_count
+from .class_plan import validate_class_copies
 from .models import GroupStatus, TaskStatus
 
 _COPIES_RE = re.compile(r"__\s*(\d+)\s*份")
@@ -36,16 +37,19 @@ def create_local_task(cloud_id: int, title: str, pdf_path, copies: int,
     pages = pdf_page_count(pdf_path)
     classes = int(meta.get("classes") or 0)
     per_class = int(meta.get("copies_per_class") or 0)
-    if classes < 1 or per_class < 1 or classes * per_class != copies:
+    chunks = validate_class_copies(classes, per_class, meta.get('class_copies') or None)
+    if sum(chunks) != copies:
         raise ValueError("班级数、每班份数与总份数不一致，请重新提交任务")
-    chunks = [per_class] * classes
     n = len(chunks)
 
     prepared = []
     for i, c in enumerate(chunks, 1):
         label = f"第 {i} 班"
         composed = config.COMPOSED_DIR / f"task{cloud_id}_class{i:04d}.pdf"
-        _, sheets = compose_group_pdf(pdf_path, composed, title, label, c)
+        cover = ({'school': meta.get('school', ''), 'grade': meta.get('grade', ''),
+                  'class_number': i, 'classes': classes} if meta.get('cover_enabled') else None)
+        _, sheets = compose_group_pdf(pdf_path, composed, meta.get('pdf_name') or title,
+                                      label, c, cover=cover)
         prepared.append((i, label, c, sheets, composed))
 
     tid = db.execute(

@@ -30,8 +30,10 @@ CREATE TABLE IF NOT EXISTS tasks(
   classes INTEGER DEFAULT 0,
   copies INTEGER NOT NULL,               -- 实际总份数，供打印执行器使用
   copies_per_class INTEGER,              -- 每班份数，供界面与统计展示
+  class_copies_json TEXT NOT NULL DEFAULT '[]', -- 提交时逐班份数快照
+  cover_enabled INTEGER NOT NULL DEFAULT 0, -- 历史任务默认无封面
   pages INTEGER NOT NULL,
-  sheets INTEGER NOT NULL,               -- 估算总张数(不含封面)
+  sheets INTEGER NOT NULL,               -- 估算总张数(含已开启的班级封面)
   note TEXT DEFAULT '',
   source_user TEXT NOT NULL,             -- 提交人账号
   priority INTEGER NOT NULL DEFAULT 0,   -- 管理员插队置顶用,越大越靠前
@@ -52,6 +54,7 @@ CREATE TABLE IF NOT EXISTS school_presets(
   grade TEXT NOT NULL,
   classes INTEGER NOT NULL DEFAULT 0 CHECK(classes >= 0),
   copies INTEGER NOT NULL DEFAULT 1 CHECK(copies >= 1),
+  overrides_json TEXT NOT NULL DEFAULT '[]', -- 特殊班级规则
   UNIQUE(school, grade)
 );
 """

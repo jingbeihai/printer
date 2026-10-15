@@ -21,6 +21,21 @@ APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "CanonPrintDesk"
 SETTINGS_PATH = APP_DIR / "client-settings.json"
 
 
+def _single_instance():
+    import msvcrt
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    stream = (APP_DIR / "client.lock").open("a+b")
+    stream.seek(0)
+    stream.write(b"0")
+    stream.flush()
+    try:
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        stream.close()
+        raise SystemExit("客户端已经运行，请先关闭已打开的窗口") from exc
+    return stream
+
+
 def _settings() -> dict:
     defaults = {
         "cloud_url": config.CLOUD_URL,
@@ -45,6 +60,24 @@ def _first_run_dialog(settings: dict) -> dict:
 
 
 def main() -> None:
+    instance_guard = _single_instance()
+    health_file = os.environ.get("PRINT_UPDATE_HEALTH_FILE")
+    if health_file:
+        from . import db
+        from .update_client import VERSION
+        config.DATA_DIR = APP_DIR / "station"
+        config.UPLOAD_DIR = config.DATA_DIR / "uploads"
+        config.COMPOSED_DIR = config.DATA_DIR / "composed"
+        config.LOCAL_DB = config.DATA_DIR / "local.db"
+        config.ensure_dirs()
+        db.init(config.LOCAL_DB, db.LOCAL_SCHEMA)
+        StationRuntime._ensure_schema_version()
+        from .desktop_web import create_desktop_app
+        create_desktop_app(_settings()['cloud_url'])
+        if not (Path(__file__).parent / 'static' / 'desk' / 'index.html').is_file():
+            raise RuntimeError('新版业务页面缺失')
+        Path(health_file).write_text(json.dumps({"version": VERSION, "pid": os.getpid()}), encoding="utf-8")
+        return
     try:
         import webview
     except ImportError as exc:
@@ -54,6 +87,8 @@ def main() -> None:
     desktop_server = None
     desktop_socket = None
     from .desktop_web import create_desktop_app
+    from .update_client import UpdateClient
+    updater = UpdateClient(APP_DIR)
     station.start()
     desktop_socket = socket.socket()
     # 固定本机来源，确保“记住登录信息”的浏览器存储跨启动有效。
@@ -64,7 +99,7 @@ def main() -> None:
         station.stop()
         raise SystemExit("客户端端口已被占用，请关闭已打开的客户端后再启动。") from exc
     desktop_server = uvicorn.Server(uvicorn.Config(
-        create_desktop_app(settings["cloud_url"], station), log_config=None,
+        create_desktop_app(settings["cloud_url"], station, updater), log_config=None,
         log_level="warning"))
     threading.Thread(target=desktop_server.run, kwargs={"sockets": [desktop_socket]}, daemon=True).start()
     deadline = time.monotonic() + 15

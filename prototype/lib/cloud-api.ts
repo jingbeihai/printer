@@ -2,7 +2,7 @@ import type { Device, Job, Preset, State } from "@/lib/print-model";
 
 type CloudTask = {
   id:number; title:string; school:string; grade:string; classes:number; copies:number;
-  copies_per_class:number; pages:number; source_user:string; status:string;
+  copies_per_class:number; class_copies:number[]; cover_enabled:boolean; sheets:number; pages:number; source_user:string; status:string;
   created_at:number; done_at:number|null;
   claimed?:boolean; print_requested_at?:number;
 };
@@ -32,7 +32,9 @@ export function toState(data:Snapshot):State{
   const username=data.user.username;
   const jobs:Job[]=data.tasks.map(task=>({
     id:task.id,title:task.title,school:task.school,grade:task.grade,classes:task.classes,
-    copies:task.copies_per_class||task.copies,pages:task.pages,user:task.source_user,
+    copies:task.copies_per_class||task.copies,totalCopies:task.copies,
+    classCopies:task.class_copies?.length?task.class_copies:Array(task.classes).fill(task.copies_per_class||task.copies),
+    coverEnabled:!!task.cover_enabled,sheets:task.sheets,pages:task.pages,user:task.source_user,
     status:task.status==="QUEUED"&&(!!task.claimed||data.station_pending_print_ids?.includes(task.id))
       ?"待下发":statuses[task.status]||task.status,progress:task.status==="DONE"?100:0,
     device:null,deviceName:"—",allocations:[],local:task.source_user===username,
@@ -117,19 +119,22 @@ function putToCos(url:string,file:File,onProgress?:(percent:number)=>void){
   });
 }
 export const uploadTask=async (
-  input:{file:File;school:string;grade:string;classes:number;copies:number;pages:number},
+  input:{file:File;school:string;grade:string;classes:number;copies:number;class_copies:number[];cover_enabled:boolean;pages:number},
   onProgress?:(percent:number)=>void,
 )=>{
   const prepared=await uploadRequest("/api/v1/uploads/presign",{
     method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
       filename:input.file.name,size:input.file.size,school:input.school,grade:input.grade,
-      classes:input.classes,copies:input.copies,pages:input.pages,
+      classes:input.classes,copies:input.copies,class_copies:input.class_copies,
+      cover_enabled:input.cover_enabled,pages:input.pages,
     }),
   });
   if(prepared.storage_backend==="local"){
     const form=new FormData();
     form.set("file",input.file);form.set("school",input.school);form.set("grade",input.grade);
     form.set("classes",String(input.classes));form.set("copies",String(input.copies));
+    form.set("class_copies",JSON.stringify(input.class_copies));
+    form.set("cover_enabled",String(input.cover_enabled));
     form.set("pages",String(input.pages));
     const result=await uploadRequest("/api/v1/tasks",{method:"POST",body:form});
     onProgress?.(100);

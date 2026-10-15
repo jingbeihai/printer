@@ -24,18 +24,7 @@ try {
     Pop-Location
 }
 
-$assets = Join-Path $project 'app\static\desk'
-$expected = Join-Path $project 'app\static\desk'
-if (Test-Path -LiteralPath $assets) {
-    $resolved = (Resolve-Path -LiteralPath $assets).Path
-    if ($resolved -ne $expected -or
-        !$resolved.StartsWith($project + [IO.Path]::DirectorySeparatorChar,
-                              [StringComparison]::OrdinalIgnoreCase)) {
-        throw '页面资源目录不在项目内，停止清理。'
-    }
-    Remove-Item -LiteralPath $resolved -Recurse -Force
-}
-Copy-Item -LiteralPath $frontend -Destination $assets -Recurse -Force
+$frontendData = "$frontend;app/static/desk"
 
 python -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw '客户端依赖安装失败。' }
@@ -43,6 +32,12 @@ if (!(Test-Path -LiteralPath (Join-Path $project 'tools\SumatraPDF.exe'))) {
     python tools/fetch_sumatra.py
     if ($LASTEXITCODE -ne 0) { throw '打印组件下载失败。' }
 }
-python -m PyInstaller --noconfirm --clean --windowed --name '绍兴数知-印务台' --collect-all webview --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module PySide2 --exclude-module PySide6 --add-data 'app/templates;app/templates' --add-data 'app/static;app/static' --add-data 'tools/SumatraPDF.exe;tools' --add-data 'tools/SumatraPDF-COPYING.txt;tools' run.py
+python -m PyInstaller --noconfirm --clean --windowed --name '绍兴数知-印务台' --collect-all webview --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module PySide2 --exclude-module PySide6 --add-data 'app/templates;app/templates' --add-data $frontendData --add-data 'app/update-channel.json;app' --add-data 'tools/SumatraPDF.exe;tools' --add-data 'tools/SumatraPDF-COPYING.txt;tools' run.py
 if ($LASTEXITCODE -ne 0) { throw '客户端打包失败。' }
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name '印务台启动器' --distpath 'dist\_launcher' --workpath 'build\_launcher' --add-data 'app/update-channel.json;app' run_updater.py
+if ($LASTEXITCODE -ne 0) { throw '更新启动器打包失败。' }
+Copy-Item -LiteralPath 'dist\_launcher\印务台启动器.exe' -Destination 'dist\绍兴数知-印务台\印务台启动器.exe' -Force
+Copy-Item -LiteralPath 'install_client.ps1' -Destination 'dist\绍兴数知-印务台\安装客户端.ps1' -Force
+python -c "import json; from pathlib import Path; from app.update_client import VERSION, SEQUENCE; Path('dist/绍兴数知-印务台/版本.json').write_text(json.dumps({'version': VERSION, 'sequence': SEQUENCE}), encoding='utf-8')"
+if ($LASTEXITCODE -ne 0) { throw '写入版本信息失败。' }
 Write-Host "已生成: $project\dist\绍兴数知-印务台\绍兴数知-印务台.exe"

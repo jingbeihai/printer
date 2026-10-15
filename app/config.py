@@ -39,7 +39,6 @@ PRINT_WINDOW = os.environ.get("PRINT_WINDOW", "")                  # 如 "13:00-
 # ---------- 调度参数 ----------
 POLL_INTERVAL = float(os.environ.get("PRINT_POLL_INTERVAL", "2"))  # 打印机轮询周期(秒)
 DUPLEX = True
-COMPLETION_SETTLE_SEC = 4       # 回idle后需持续的秒数,防止假完成
 # ---------- Windows 真机后端 ----------
 SUMATRA_PATH = os.environ.get("SUMATRA_PATH", str(BASE_DIR / "tools" / "SumatraPDF.exe"))
 

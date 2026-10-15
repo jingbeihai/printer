@@ -13,6 +13,10 @@ from pathlib import Path
 from . import config
 
 
+class SubmissionNotStarted(RuntimeError):
+    """A preflight failure: no printing process was started."""
+
+
 class BackendBase:
     name = "base"
 
@@ -104,8 +108,8 @@ class WindowsBackend(BackendBase):
         try:
             jobs = win32print.EnumJobs(handle, 0, 9999, 1)
             matched = [job for job in jobs if PureWindowsPath(job.get('pDocument') or '').name.casefold() == expected]
-            if jobs and not matched:
-                raise RuntimeError("Windows 队列中无法准确识别此任务，请在系统打印队列中操作")
+            # A prefetched class may have left the queue since the last poll.
+            # A missing match is a no-op, never a reason to control other jobs.
             command = {'pause': win32print.JOB_CONTROL_PAUSE,
                        'resume': win32print.JOB_CONTROL_RESUME,
                        'cancel': win32print.JOB_CONTROL_DELETE}[action]
@@ -126,13 +130,22 @@ class WindowsBackend(BackendBase):
     def submit(self, printer, pdf_path):
         import subprocess
         if not Path(config.SUMATRA_PATH).is_file():
-            raise RuntimeError("缺少 PDF 打印组件 SumatraPDF.exe")
-        if printer["queue_name"] not in {item["queue"] for item in self.installed_printers()}:
-            raise RuntimeError("Windows 打印队列不存在，请先在系统中安装驱动并添加打印机")
+            raise SubmissionNotStarted("缺少 PDF 打印组件 SumatraPDF.exe")
+        if not Path(pdf_path).is_file():
+            raise SubmissionNotStarted("班级 PDF 文件不存在")
+        try:
+            installed = {item["queue"] for item in self.installed_printers()}
+        except Exception as exc:
+            raise SubmissionNotStarted(f"无法读取 Windows 打印队列：{exc}") from exc
+        if printer["queue_name"] not in installed:
+            raise SubmissionNotStarted("Windows 打印队列不存在，请先在系统中安装驱动并添加打印机")
         args = [config.SUMATRA_PATH, "-print-to", printer["queue_name"],
                 "-print-settings", "duplexlong,monochrome,1x", "-silent", str(pdf_path)]
-        result = subprocess.run(args, timeout=300, check=False,
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            result = subprocess.run(args, timeout=300, check=False,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError as exc:
+            raise SubmissionNotStarted(f"无法启动 PDF 打印组件：{exc}") from exc
         if result.returncode:
             raise RuntimeError(f"PDF 下发失败，打印组件返回代码 {result.returncode}")
         return f"win-{printer['id']}-{int(time.time())}"
@@ -143,15 +156,14 @@ class WindowsBackend(BackendBase):
                 return {"status": "offline", "page_counter": -1, "detail": "Windows 队列不存在"}
         except Exception as e:
             return {"status": "offline", "page_counter": -1, "detail": str(e)}
-        snmp = _snmp_status(printer.get("ip", ""))
-        if snmp:
-            return snmp
         try:
             import win32print
             h = win32print.OpenPrinter(printer["queue_name"])
-            info = win32print.GetPrinter(h, 2)
-            jobs = win32print.EnumJobs(h, 0, 9999, 1)
-            win32print.ClosePrinter(h)
+            try:
+                info = win32print.GetPrinter(h, 2)
+                jobs = win32print.EnumJobs(h, 0, 9999, 1)
+            finally:
+                win32print.ClosePrinter(h)
             status = info["Status"]
             if status & 0x00000020:
                 st = "paper_out"
@@ -163,6 +175,15 @@ class WindowsBackend(BackendBase):
                 st = "printing"
             else:
                 st = "idle"
-            return {"status": st, "page_counter": -1, "detail": f"win32 status={status}"}
+            snmp = _snmp_status(printer.get("ip", ""))
+            result = snmp or {"status": st, "page_counter": -1, "detail": f"win32 status={status}"}
+            if st in ('offline', 'paper_out', 'jam'):
+                result['status'] = st
+            terminal = (getattr(win32print, 'JOB_STATUS_PRINTED', 0x80) |
+                        getattr(win32print, 'JOB_STATUS_COMPLETE', 0x1000) |
+                        getattr(win32print, 'JOB_STATUS_DELETED', 0x100))
+            result['jobs'] = [{'id': job['JobId'], 'document': job.get('pDocument') or '',
+                               'finished': bool(job.get('Status', 0) & terminal)} for job in jobs]
+            return result
         except Exception as e:  # noqa: BLE001
             return {"status": "offline", "page_counter": -1, "detail": str(e)}

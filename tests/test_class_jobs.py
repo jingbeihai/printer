@@ -38,6 +38,42 @@ class ClassJobTests(unittest.TestCase):
         self.assertEqual((pages, sheets), (3, expected_sheets))
         self.assertEqual(len(PdfReader(str(output)).pages), expected_pages)
 
+    def test_special_classes_and_one_cover_per_class(self):
+        plan = [50] * 20
+        for number in (6, 10, 15):
+            plan[number - 1] = 40
+        tid = importer.create_local_task(
+            905, '八年级数学练习', self.pdf, 970, meta={
+                'school': '实验学校', 'grade': '八年级', 'classes': 20,
+                'copies_per_class': 50, 'class_copies': plan, 'cover_enabled': True})
+        groups = db.q('SELECT * FROM groups WHERE task_id=? ORDER BY seq', (tid,))
+        self.assertEqual([group['copies'] for group in groups], plan)
+        self.assertEqual(sum(group['sheets'] for group in groups),
+                         970 * (2 if config.DUPLEX else 3) + 20)
+        for number in (1, 6, 10, 15, 20):
+            group = groups[number - 1]
+            pdf = PdfReader(group['composed_path'])
+            self.assertEqual(len(pdf.pages), (2 if config.DUPLEX else 1) +
+                             group['copies'] * (4 if config.DUPLEX else 3))
+            if config.DUPLEX:
+                self.assertEqual(pdf.pages[1].get_contents(), None)
+
+        printer = db.execute("INSERT INTO printers(name,queue_name,state) VALUES('A','q','IDLE')")
+        station = StationRuntime({'cloud_url': 'https://example.invalid'}, self.root, lambda _: None)
+        station.executor = object()
+        station.syncer = Mock(last_error='', cookie='pc_session=test')
+        station.request_print({'id': 905, 'classes': 20, 'copies_per_class': 50,
+                               'class_copies': plan, 'cover_enabled': True,
+                               'copies': 970}, [printer])
+        self.assertEqual(db.one('SELECT COUNT(*) n FROM groups WHERE printer_id=?',
+                                (printer,))['n'], 20)
+
+    def test_inconsistent_special_class_plan_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, '不一致'):
+            importer.create_local_task(906, 'bad', self.pdf, 10,
+                                       meta={'classes': 2, 'copies_per_class': 5,
+                                             'class_copies': [5, 4]})
+
     def test_twenty_classes_create_twenty_jobs_and_stable_7_7_6_allocation(self):
         task_id = importer.create_local_task(
             900, '数学练习', self.pdf, 800, meta={
@@ -69,6 +105,34 @@ class ClassJobTests(unittest.TestCase):
             importer.create_local_task(901, 'bad', self.pdf, 10,
                                        meta={'classes': 3, 'copies_per_class': 4},
                                        )
+
+    def test_legacy_empty_plan_keeps_uniform_copies_without_cover(self):
+        tid = importer.create_local_task(907, '旧任务', self.pdf, 4,
+            meta={'classes': 2, 'copies_per_class': 2,
+                  'class_copies': [], 'cover_enabled': False})
+        groups = db.q('SELECT copies,sheets,composed_path FROM groups WHERE task_id=? ORDER BY seq',
+                      (tid,))
+        self.assertEqual([group['copies'] for group in groups], [2, 2])
+        self.assertEqual([group['sheets'] for group in groups],
+                         [4 if config.DUPLEX else 6] * 2)
+
+    def test_unprinted_legacy_cache_is_rebuilt_with_cover_after_upgrade(self):
+        old_id = importer.create_local_task(908, '旧缓存', self.pdf, 2,
+                                            meta={'classes': 1, 'copies_per_class': 2})
+        printer = db.execute("INSERT INTO printers(name,queue_name,state) VALUES('A','q','IDLE')")
+        station = StationRuntime({'cloud_url': 'https://example.invalid'}, self.root, lambda _: None)
+        station.executor = object()
+        station.syncer = Mock(last_error='', cookie='pc_session=test')
+        station.syncer._download.return_value = self.pdf
+        station.request_print({'id': 908, 'title': '旧缓存', 'pdf_name': '旧缓存.pdf',
+                               'classes': 1, 'copies_per_class': 2, 'copies': 2,
+                               'cover_enabled': True, 'class_copies': [2]}, [printer])
+        self.assertIsNone(db.one('SELECT id FROM local_tasks WHERE id=?', (old_id,)))
+        new_id = db.one('SELECT id FROM local_tasks WHERE cloud_id=908')['id']
+        group = db.one('SELECT * FROM groups WHERE task_id=?', (new_id,))
+        self.assertEqual(group['sheets'], 5 if config.DUPLEX else 7)
+        self.assertEqual(len(PdfReader(group['composed_path']).pages),
+                         10 if config.DUPLEX else 7)
 
     def test_last_completed_class_finishes_task_without_pickup_confirmation(self):
         tid = importer.create_local_task(903, '数学', self.pdf, 2,

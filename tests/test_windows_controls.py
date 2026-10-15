@@ -26,7 +26,7 @@ class WindowsControlTests(unittest.TestCase):
     def test_unknown_jobs_are_not_purged(self):
         win = Mock()
         win.EnumJobs.return_value = [{'JobId': 13, 'pDocument': 'other.pdf'}]
-        with patch.dict('sys.modules', {'win32print':win}), self.assertRaisesRegex(RuntimeError,'无法准确识别'):
-            WindowsBackend().control_group({'queue_name':'printer'}, 'task.pdf','cancel')
+        with patch.dict('sys.modules', {'win32print':win}):
+            self.assertEqual(WindowsBackend().control_group({'queue_name':'printer'}, 'task.pdf','cancel'), 0)
         win.SetJob.assert_not_called()
         win.ClosePrinter.assert_called_once()
