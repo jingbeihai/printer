@@ -253,15 +253,27 @@ class StationRuntimeTests(unittest.TestCase):
         self.assertEqual(self.station.fleet_tasks(),[])
         backend.control_group.assert_called_once()
 
-    def test_driver_error_stops_dispatch_without_claiming_cancel_success(self):
+    def test_driver_error_cancels_future_dispatch_and_reports_partial_control(self):
         pid,tid,gid,backend = self.prepare_control_task()
         backend.control_group.side_effect = RuntimeError('access denied')
-        with self.assertRaisesRegex(RuntimeError,'控制失败'):
-            self.station.control_task(50,'cancel')
+        message = self.station.control_task(50,'cancel')
         task = db.one('SELECT * FROM local_tasks WHERE id=?',(tid,))
-        self.assertEqual(task['status'],'PRINTING')
+        self.assertEqual(task['status'],'CANCELED')
         self.assertEqual(task['paused'],1)
-        self.assertEqual(db.one('SELECT current_group FROM printers WHERE id=?',(pid,))['current_group'],gid)
+        self.assertIsNone(db.one('SELECT current_group FROM printers WHERE id=?',(pid,))['current_group'])
+        self.assertIn('部分作业未在 Windows 队列中匹配或控制失败', message)
+
+    def test_runtime_logs_are_scoped_to_task_owner(self):
+        own = db.execute("INSERT INTO local_tasks(cloud_id,title,meta_json,copies,pages,pdf_path,created_at) "
+                         "VALUES(71,'own',?,1,1,'own.pdf',0)", (json.dumps({'source_user': 'alice'}),))
+        other = db.execute("INSERT INTO local_tasks(cloud_id,title,meta_json,copies,pages,pdf_path,created_at) "
+                           "VALUES(72,'other',?,1,1,'other.pdf',0)", (json.dumps({'source_user': 'bob'}),))
+        db.log_event('OWN', 'visible', task_id=own)
+        db.log_event('OTHER', 'hidden', task_id=other)
+        db.log_event('GLOBAL', 'admin only')
+        self.assertEqual([r['type'] for r in self.station.runtime_logs('alice', 'user')], ['OWN'])
+        self.assertEqual(len(self.station.runtime_logs('alice', 'superadmin')), 3)
+        self.assertEqual(self.station.runtime_logs('alice', 'user', cloud_task_id=72), [])
 
     def test_waiting_order_can_move_with_equal_timestamps(self):
         from app.executor import Executor

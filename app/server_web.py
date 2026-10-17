@@ -438,6 +438,30 @@ def create_app() -> FastAPI:
         db.log_event("TASK_CANCELED", f"{user['username']} 取消任务", task_id=tid, table="task_events")
         return api_snapshot(req)
 
+    @app.post("/api/v1/tasks/{tid}/force-cancel")
+    async def api_task_force_cancel(req: Request, tid: int):
+        user, error = api_user(req)
+        if error:
+            return error
+        task = db.one("SELECT source_user,status FROM tasks WHERE id=?", (tid,))
+        if not task:
+            return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+        if task["source_user"] != user["username"] and user["role"] != ROLE_SUPERADMIN:
+            return JSONResponse({"ok": False, "error": "只能结束自己提交的任务"}, status_code=403)
+        if task["status"] != TaskStatus.PRINTING.value:
+            return JSONResponse({"ok": False, "error": "只能结束状态为打印中的异常任务"}, status_code=409)
+        body = await req.json()
+        if body.get("confirm_stopped") is not True:
+            return JSONResponse({"ok": False, "error": "请先确认打印机和 Windows 队列已停止该任务"}, status_code=400)
+        changed = db.update_count(
+            "UPDATE tasks SET status='CANCELED',done_at=? WHERE id=? AND status='PRINTING'",
+            (time.time(), tid))
+        if not changed:
+            return JSONResponse({"ok": False, "error": "任务状态已变化，请刷新列表"}, status_code=409)
+        db.log_event("TASK_FORCE_CANCELED", f"{user['username']} 确认设备已停打并结束异常任务",
+                     task_id=tid, table="task_events")
+        return api_snapshot(req)
+
     @app.post("/api/v1/tasks/{tid}/move")
     async def api_task_move(req: Request, tid: int):
         user, error = api_user(req)

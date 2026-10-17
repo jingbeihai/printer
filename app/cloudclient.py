@@ -17,10 +17,11 @@ from . import config, db, importer
 
 
 class CloudSync:
-    def __init__(self, cloud_url=None, cookie=None, client_id=None):
+    def __init__(self, cloud_url=None, cookie=None, client_id=None, cancel_handler=None):
         self.base = (cloud_url or config.CLOUD_URL).rstrip("/")
         self.cookie = cookie or ""
         self.client_id = client_id or ""
+        self.cancel_handler = cancel_handler
         self.last_error = ""
         self._tick_lock = threading.Lock()
         self._download_lock = threading.Lock()
@@ -64,7 +65,12 @@ class CloudSync:
             raise RuntimeError(data.get("error", "sync rejected"))
 
         # ---- 取消 ----
-        importer.cancel_by_cloud_ids(data.get("canceled", []))
+        canceled = data.get("canceled", [])
+        if self.cancel_handler:
+            for cid in canceled:
+                self.cancel_handler(cid)
+        else:
+            importer.cancel_by_cloud_ids(canceled)
 
         # ---- 优先级更新 ----
         for cid, pri in (data.get("priorities") or {}).items():

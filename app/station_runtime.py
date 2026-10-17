@@ -75,8 +75,18 @@ class StationRuntime:
                 if self.syncer:
                     self.syncer.deactivate()
                 self.syncer = CloudSync(self.settings["cloud_url"], cookie=cookie,
-                                        client_id=self.settings["client_id"])
+                                        client_id=self.settings["client_id"],
+                                        cancel_handler=self.cancel_from_cloud)
                 self.executor.syncer = self.syncer
+
+    def cancel_from_cloud(self, cloud_id):
+        task = db.one("SELECT status,print_requested FROM local_tasks WHERE cloud_id=?", (cloud_id,))
+        if not task or task['status'] in ('DONE', 'CANCELED'):
+            return
+        if task['print_requested']:
+            self.control_task(cloud_id, 'cancel', actor='云端取消')
+        else:
+            importer.cancel_by_cloud_ids([cloud_id])
 
     def clear_session(self):
         with self.lock:
@@ -117,7 +127,7 @@ class StationRuntime:
             return []
         result = []
         for task in db.q("SELECT * FROM local_tasks WHERE print_requested=1 AND status NOT IN ('DONE','CANCELED') ORDER BY print_requested_at,id"):
-            groups = db.q("SELECT printer_id,status,label FROM groups WHERE task_id=? ORDER BY seq", (task['id'],))
+            groups = db.q("SELECT id,seq,printer_id,status,label,started_at,done_at FROM groups WHERE task_id=? ORDER BY seq", (task['id'],))
             per_printer = {}
             for group in groups:
                 if group['printer_id'] is not None:
@@ -128,6 +138,7 @@ class StationRuntime:
                            'active_printer_ids': [g['printer_id'] for g in groups if g['status']=='PRINTING'],
                            'completed_groups': sum(g['status']=='DONE' for g in groups),
                            'total_groups': len(groups),
+                           'class_groups': [self._class_progress(g, bool(task['paused'])) for g in groups],
                            'allocations': [{'printer_id': pid, 'groups': len(items),
                                             'labels': [g['label'] for g in items],
                                             'completed': sum(g['status']=='DONE' for g in items),
@@ -138,9 +149,62 @@ class StationRuntime:
                                               for g in db.q("SELECT id,label,printer_id,status FROM groups WHERE task_id=? AND status='PAUSED'", (task['id'],))]})
         return result
 
-    def control_task(self, cloud_id, action, printer_id=None):
+    def _class_progress(self, group, task_paused=False):
+        status = group['status']
+        tracking = self.executor._tracking(group['id']) if status in ('PRINTING', 'PAUSED') else {}
+        if status == 'DONE':
+            display = 'done'
+        elif status == 'PAUSED':
+            display = 'problem'
+        elif status == 'PRINTING' and task_paused:
+            display = 'paused'
+        elif status == 'PRINTING' and tracking.get('printing'):
+            display = 'printing'
+        elif status == 'PRINTING' and tracking.get('seen'):
+            display = 'spooled'
+        elif status == 'PRINTING':
+            display = 'submitting'
+        else:
+            display = 'pending'
+        return {'id': group['id'], 'seq': group['seq'], 'label': group['label'],
+                'printer_id': group['printer_id'], 'status': status, 'display': display,
+                'started_at': group['started_at'], 'done_at': group['done_at']}
+
+    def runtime_logs(self, username: str, role: str, cloud_task_id: int | None = None,
+                     group_id: int | None = None, limit: int = 300):
+        """Return bounded local events visible to this signed-in cloud user."""
+        if not self.enabled:
+            return []
+        limit = max(1, min(int(limit), 1000))
+        # Fetch extra rows because ordinary users cannot see global or other users' events.
+        rows = db.q("SELECT e.*,t.cloud_id,t.title,t.meta_json,g.label AS group_label,"
+                    "p.name AS printer_name FROM events e "
+                    "LEFT JOIN local_tasks t ON t.id=e.task_id "
+                    "LEFT JOIN groups g ON g.id=e.group_id "
+                    "LEFT JOIN printers p ON p.id=e.printer_id "
+                    "WHERE (? IS NULL OR t.cloud_id=?) AND (? IS NULL OR e.group_id=?) "
+                    "ORDER BY e.id DESC LIMIT ?",
+                    (cloud_task_id, cloud_task_id, group_id, group_id, min(limit * 5, 5000)))
+        result = []
+        for row in rows:
+            item = dict(row)
+            meta = json.loads(item.pop('meta_json') or '{}')
+            if role != 'superadmin' and (not item['task_id'] or meta.get('source_user') != username):
+                continue
+            result.append(item)
+            if len(result) >= limit:
+                break
+        return result
+
+    def control_task(self, cloud_id, action, printer_id=None, actor=None):
         if action not in ('pause', 'resume', 'cancel', 'up', 'down'):
             raise ValueError("不支持的任务操作")
+        # This flag is observed between submissions even if the driver currently
+        # holds the executor lock for a slow SumatraPDF invocation.
+        preflight = db.one("SELECT id,status FROM local_tasks WHERE cloud_id=? AND print_requested=1", (cloud_id,))
+        if action in ('pause', 'cancel') and preflight and preflight['status'] not in ('DONE', 'CANCELED'):
+            self.executor._halt_tasks.add(preflight['id'])
+            db.log_event('TASK_CONTROL_REQUESTED', f"{actor or '本机用户'} 请求{action}", task_id=preflight['id'])
         with self.print_lock, self.executor.control_lock:
             task = db.one("SELECT * FROM local_tasks WHERE cloud_id=? AND print_requested=1", (cloud_id,))
             if not task or task['status'] in ('DONE','CANCELED'):
@@ -168,12 +232,16 @@ class StationRuntime:
             # Stop dispatch first, including when a driver rejects the control.
             db.execute('UPDATE local_tasks SET paused=1 WHERE id=?', (task['id'],))
             matched = 0
+            controlled_groups = 0
+            failures = []
             for group in active:
                 printer = dict(db.one('SELECT * FROM printers WHERE id=?', (group['printer_id'],)))
                 try:
-                    matched += self.executor.backend.control_group(printer, group['composed_path'], action)
+                    count = self.executor.backend.control_group(printer, group['composed_path'], action)
+                    matched += count
+                    controlled_groups += bool(count)
                 except Exception as exc:
-                    raise RuntimeError(f'后续下发已暂停，但 Windows 作业控制失败：{exc}') from exc
+                    failures.append(f"{group['label']}：{exc}")
             if action=='cancel':
                 db.execute("UPDATE local_tasks SET status='CANCELED',done_at=? WHERE id=?", (time.time(),task['id']))
                 db.execute("UPDATE groups SET status='PAUSED' WHERE task_id=? AND status!='DONE'", (task['id'],))
@@ -182,11 +250,20 @@ class StationRuntime:
                     self.executor._idle_since.pop(group['printer_id'], None)
                     self.executor._close_run_session(group['printer_id'], -1, 'task_canceled')
             elif action=='resume':
-                db.execute('UPDATE local_tasks SET paused=0 WHERE id=?', (task['id'],))
-                for group in active:
-                    self.executor._idle_since.pop(group['printer_id'], None)
-            db.log_event('TASK_CONTROL', action, task_id=task['id'])
-            return ('已停止后续下发；已进入打印机缓存的页面可能继续出纸' if action!='resume' and active and not matched else '')
+                if not failures:
+                    db.execute('UPDATE local_tasks SET paused=0 WHERE id=?', (task['id'],))
+                    self.executor._halt_tasks.discard(task['id'])
+                    for group in active:
+                        self.executor._idle_since.pop(group['printer_id'], None)
+            summary = f'{action}：匹配并控制{controlled_groups}/{len(active)}个班级、{matched}个 Windows 作业'
+            if failures:
+                summary += '；失败：' + '；'.join(failures)
+            db.log_event('TASK_CONTROL', f"{actor or '本机用户'} {summary}", task_id=task['id'])
+            if action == 'resume' and failures:
+                raise RuntimeError('继续打印未完全成功；' + summary)
+            if action in ('pause', 'cancel') and active and controlled_groups < len(active):
+                return '已停止后续下发；部分作业未在 Windows 队列中匹配或控制失败，请在打印机上检查并停止剩余出纸。' + summary
+            return ('已停止后续下发；设备缓存中的页面可能继续出纸' if action!='resume' else '任务已继续')
 
     def resolve_class_group(self, cloud_id, group_id, action, confirm_stopped=False,
                             confirm_unmatched=False):
@@ -403,7 +480,11 @@ class StationRuntime:
             db.execute("DELETE FROM local_tasks WHERE id=?", (task['id'],))
             task = None
         if not task:
+            prepare_start = time.monotonic()
+            db.log_event('PRINT_PREPARE_STARTED', f'任务#{cloud_id} 开始准备打印文件')
+            download_start = time.monotonic()
             pdf_path = syncer._download(cloud_id, cloud_task["pdf_name"])
+            db.log_event('PRINT_DOWNLOAD_DONE', f'任务#{cloud_id} 下载耗时{time.monotonic()-download_start:.2f}秒')
             meta = {key: cloud_task.get(key, "") for key in
                     ("school", "grade", "classes", "copies_per_class", "class_copies",
                      "cover_enabled", "pdf_name", "note", "source_user")}
@@ -417,6 +498,8 @@ class StationRuntime:
                 cloud_id, cloud_task["title"], pdf_path, int(cloud_task["copies"]),
                 priority=int(cloud_task.get("priority", 0)), meta=meta)
             task = db.one("SELECT * FROM local_tasks WHERE cloud_id=?", (cloud_id,))
+            db.log_event('PRINT_PREPARE_DONE', f'任务#{cloud_id} 文件准备总耗时{time.monotonic()-prepare_start:.2f}秒',
+                         task_id=task['id'])
         elif task['job_model'] != 'class':
             raise ValueError("本地缓存为不受支持的旧作业。请先取消旧任务，再重新提交云端任务")
         task_meta = json.loads(task['meta_json'] or '{}')

@@ -52,6 +52,9 @@ export const saveSchool=(id:number|null,input:Omit<Preset,"id">)=>request(
   });
 export const deleteSchool=(id:number)=>request(`/api/v1/schools/${id}`,{method:"DELETE"});
 export const cancelTask=(id:number)=>request(`/api/v1/tasks/${id}/cancel`,{method:"POST"});
+export const forceCancelTask=(id:number)=>request(`/api/v1/tasks/${id}/force-cancel`,{
+  method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm_stopped:true}),
+});
 export const moveTask=(id:number,direction:"up"|"down")=>request(`/api/v1/tasks/${id}/move`,{
   method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({direction}),
 });
@@ -80,8 +83,19 @@ async function accountRequest(init?:RequestInit):Promise<{ok:boolean;error?:stri
 }
 export const loadAccount=()=>accountRequest();
 export const updateAccount=(value:{display_name:string;old_password?:string;new_password?:string})=>accountRequest({method:"PUT",...jsonBody(value)});
-export type FleetTask={id:number;title:string;status:string;paused:boolean;printer_ids:number[];active_printer_ids:number[];completed_groups:number;total_groups:number;allocations:{printer_id:number;groups:number;labels:string[];completed:number;blocked:number}[];blocked_groups:{id:number;label:string;printer_id:number;status:string}[]};
+export type FleetClass={id:number;seq:number;label:string;printer_id:number;status:string;display:'pending'|'submitting'|'spooled'|'paused'|'printing'|'done'|'problem';started_at:number|null;done_at:number|null};
+export type FleetTask={id:number;title:string;status:string;paused:boolean;printer_ids:number[];active_printer_ids:number[];completed_groups:number;total_groups:number;class_groups:FleetClass[];allocations:{printer_id:number;groups:number;labels:string[];completed:number;blocked:number}[];blocked_groups:{id:number;label:string;printer_id:number;status:string}[]};
 type LocalReply={ok:boolean;error?:string;message?:string;tasks?:FleetTask[];printers?:{queue:string;driver:string;port:string}[]};
+export type RuntimeLog={id:number;ts:number;type:string;detail:string;task_id:number|null;cloud_id:number|null;title:string|null;group_id:number|null;group_label:string|null;printer_id:number|null;printer_name:string|null};
+type LogsReply={ok:boolean;error?:string;logs:RuntimeLog[]};
+export async function loadRuntimeLogs(taskId?:number,groupId?:number):Promise<RuntimeLog[]>{
+ const params=new URLSearchParams();if(taskId)params.set('task_id',String(taskId));if(groupId)params.set('group_id',String(groupId));
+ const response=await fetch('/desktop/logs'+(params.size?'?'+params.toString():''),{credentials:'include'});
+ const body=await response.json() as LogsReply;
+ if(response.status===401){window.location.assign('/login');throw new Error('登录已失效')}
+ if(!response.ok||!body.ok)throw new Error(body.error||'读取运行日志失败');
+ return body.logs;
+}
 async function localRequest(path:string,init?:RequestInit):Promise<LocalReply>{
   const response=await fetch(path,{credentials:"include",...init});
   let body:LocalReply;

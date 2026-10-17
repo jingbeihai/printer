@@ -281,6 +281,23 @@ def create_desktop_app(cloud_url: str, station=None, updater=None) -> FastAPI:
             return JSONResponse({'ok': False, 'error': '此客户端没有打印站服务'}, status_code=503)
         return {'ok': True, 'tasks': await run_in_threadpool(station.fleet_tasks)}
 
+    @app.get('/desktop/logs')
+    async def runtime_logs(request: Request):
+        identity, error = await cloud_identity(request)
+        if error:
+            return error
+        if station is None:
+            return JSONResponse({'ok': False, 'error': '此客户端没有打印站服务'}, status_code=503)
+        try:
+            task_id = request.query_params.get('task_id')
+            group_id = request.query_params.get('group_id')
+            rows = await run_in_threadpool(
+                station.runtime_logs, identity['user']['username'], identity['user']['role'],
+                int(task_id) if task_id else None, int(group_id) if group_id else None, 500)
+        except ValueError:
+            return JSONResponse({'ok': False, 'error': '筛选条件无效'}, status_code=400)
+        return {'ok': True, 'logs': rows}
+
     @app.post('/desktop/tasks/{tid}/control')
     async def control_task(request: Request, tid: int):
         identity, error = await cloud_identity(request)
@@ -290,7 +307,8 @@ def create_desktop_app(cloud_url: str, station=None, updater=None) -> FastAPI:
             return JSONResponse({'ok': False, 'error': '此客户端没有打印站服务'}, status_code=503)
         body = await request.json()
         try:
-            message = await run_in_threadpool(station.control_task, tid, body.get('action'), body.get('printer_id'))
+            message = await run_in_threadpool(station.control_task, tid, body.get('action'),
+                                              body.get('printer_id'), identity['user']['username'])
         except (ValueError, RuntimeError, OSError) as exc:
             return local_failure(exc)
         return {'ok': True, 'message': message or ''}

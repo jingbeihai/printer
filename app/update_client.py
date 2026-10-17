@@ -33,9 +33,17 @@ class UpdateClient:
 
     @property
     def enabled(self):
-        return bool(getattr(sys, "frozen", False) and self.manifest_url and len(self.public_key) == 32
-                    and (self.install_root / LAUNCHER_EXE).is_file()
-                    and (self.install_root / "current.json").is_file())
+        return self.disabled_reason is None
+
+    @property
+    def disabled_reason(self):
+        if not getattr(sys, "frozen", False):
+            return "development"
+        if not self.manifest_url or len(self.public_key) != 32:
+            return "channel"
+        if not (self.install_root / LAUNCHER_EXE).is_file() or not (self.install_root / "current.json").is_file():
+            return "launcher"
+        return None
 
     @property
     def install_root(self):
@@ -43,6 +51,7 @@ class UpdateClient:
 
     def status(self):
         return {"version": VERSION, "sequence": SEQUENCE, "enabled": self.enabled,
+                "disabled_reason": self.disabled_reason,
                 "download_percent": self.progress,
                 "update": self.doc and {key: self.doc.get(key) for key in
                                          ("version", "sequence", "notes", "size")}}

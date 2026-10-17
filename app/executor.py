@@ -22,6 +22,7 @@ class Executor:
         self._idle_since = {}  # compatibility with task controls
         self._print_tick = {}
         self._retry_after = {}
+        self._halt_tasks = set()
 
     def start(self):
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -104,16 +105,47 @@ class Executor:
             matches = [job for job in jobs if PureWindowsPath(job['document']).name.casefold() == expected]
             tracking = self._tracking(g['id'])
             if matches:
+                if not tracking.get('seen'):
+                    db.log_event('SPOOL_JOB_SEEN', f"{g['label']} Windows 作业号：{', '.join(str(job['id']) for job in matches)}",
+                                 printer_id=pid, group_id=g['id'], task_id=g['task_id'])
                 tracking.update(accepted=True, seen=True)
+                if any(job.get('printing') for job in matches) and not tracking.get('printing'):
+                    tracking['printing'] = True
+                    db.log_event('SPOOL_JOB_PRINTING', f"{g['label']} Windows 报告作业正在打印",
+                                 printer_id=pid, group_id=g['id'], task_id=g['task_id'])
                 self._save_tracking(g['id'], tracking)
+                if any(job.get('failed') for job in matches):
+                    db.execute("UPDATE groups SET status='PAUSED' WHERE id=?", (g['id'],))
+                    if not tracking.get('failed'):
+                        details = ', '.join(f"#{job['id']} 状态{job.get('status_code', 0)} {job.get('status_text', '')}"
+                                            for job in matches if job.get('failed'))
+                        db.log_event('SPOOL_JOB_FAILED', f"{g['label']} Windows 作业失败：{details}",
+                                     printer_id=pid, group_id=g['id'], task_id=g['task_id'])
+                        tracking['failed'] = True
+                        self._save_tracking(g['id'], tracking)
+                    continue
+                if tracking.get('failed'):
+                    continue
                 db.execute("UPDATE groups SET status='PRINTING' WHERE id=?", (g['id'],))
+            elif tracking.get('failed'):
+                continue
             elif not tracking['accepted']:
                 # Includes a restart between persisting intent and driver acknowledgement.
                 db.execute("UPDATE groups SET status='PAUSED' WHERE id=?", (g['id'],))
+            elif not tracking['seen'] and queue_drained:
+                db.execute("UPDATE groups SET status='PAUSED' WHERE id=?", (g['id'],))
+                if not tracking.get('unobserved'):
+                    tracking['unobserved'] = True
+                    self._save_tracking(g['id'], tracking)
+                    db.log_event('SPOOL_UNOBSERVED', f"{g['label']} 下发后未观察到 Windows 作业；队列已空，结果待核对",
+                                 printer_id=pid, group_id=g['id'], task_id=g['task_id'])
+                continue
             ended = (matches and all(job.get('finished', False) for job in matches)) or (
-                not matches and tracking['accepted'] and (tracking['seen'] or queue_drained))
+                not matches and tracking['accepted'] and tracking['seen'])
             if ended:
-                self._finish_group(g)
+                reason = ('Windows 报告作业处理完成' if matches else
+                          '此前观察到的 Windows 作业已离开队列')
+                self._finish_group(g, reason)
         active = db.one("SELECT id FROM groups WHERE printer_id=? AND status='PRINTING' ORDER BY id LIMIT 1", (pid,))
         db.execute('UPDATE printers SET current_group=?,state=? WHERE id=?',
                    (active['id'] if active else None, 'PRINTING' if active or status == 'printing' else 'IDLE', pid))
@@ -123,13 +155,13 @@ class Executor:
             if fresh['continuous_print_seconds'] >= fresh['max_continuous_minutes'] * 60:
                 self._start_rest(fresh)
 
-    def _finish_group(self, g):
+    def _finish_group(self, g, reason='Windows 队列处理结束'):
         if not db.update_count("UPDATE groups SET status='DONE',done_at=? WHERE id=? AND status IN ('PRINTING','PAUSED')",
                                (time.time(), g['id'])):
             return
         db.execute('UPDATE printers SET pages_total=pages_total+? WHERE id=?', (g['sheets'], g['printer_id']))
         db.execute('DELETE FROM config_kv WHERE key=?', (f"spool:{g['id']}",))
-        db.log_event('GROUP_DONE', f"{g['label']} Windows 队列处理结束", printer_id=g['printer_id'],
+        db.log_event('GROUP_DONE', f"{g['label']} {reason}", printer_id=g['printer_id'],
                      group_id=g['id'], task_id=g['task_id'])
         importer.on_group_done(g['id'])
         task = db.one('SELECT status FROM local_tasks WHERE id=?', (g['task_id'],))
@@ -188,6 +220,8 @@ class Executor:
             self._assign_task(task)
 
     def _assign_task(self, task):
+        if task['id'] in self._halt_tasks:
+            return
         allowed = set(json.loads(task['printer_ids'] or '[]'))
         for row in db.q("SELECT * FROM printers WHERE enabled=1 AND state IN ('IDLE','PRINTING')"):
             p = dict(row)
@@ -206,6 +240,8 @@ class Executor:
                 continue
             count = db.one("SELECT COUNT(*) n FROM groups WHERE printer_id=? AND status='PRINTING'", (pid,))['n']
             for _ in range(max(0, self.PREFETCH - count)):
+                if task['id'] in self._halt_tasks:
+                    break
                 g = db.one("SELECT * FROM groups WHERE task_id=? AND printer_id=? AND status='QUEUED' ORDER BY seq LIMIT 1",
                            (task['id'], pid))
                 if not g:
@@ -214,19 +250,24 @@ class Executor:
                 self._save_tracking(g['id'], {'accepted': False, 'seen': False})
                 db.execute("UPDATE groups SET status='PRINTING',started_at=?,start_counter=? WHERE id=?",
                            (time.time(), p['page_counter'], g['id']))
+                db.log_event('SUBMIT_STARTED', f"{g['label']} 开始下发；文件 {PureWindowsPath(g['composed_path']).name}",
+                             printer_id=pid, group_id=g['id'], task_id=task['id'])
+                submit_start = time.monotonic()
                 try:
                     job_id = self.backend.submit(p, g['composed_path'])
                 except SubmissionNotStarted as exc:
                     db.execute("UPDATE groups SET status='QUEUED',started_at=NULL WHERE id=?", (g['id'],))
                     self._retry_after[pid] = time.time() + 10
-                    db.log_event('SUBMIT_FAIL', f'{exc}；10秒后自动重试', printer_id=pid, group_id=g['id'], task_id=task['id'])
+                    db.log_event('SUBMIT_FAIL', f'{exc}；耗时{time.monotonic()-submit_start:.2f}秒；10秒后自动重试', printer_id=pid, group_id=g['id'], task_id=task['id'])
                     break
                 except Exception as exc:
                     db.execute("UPDATE groups SET status='PAUSED' WHERE id=?", (g['id'],))
-                    db.log_event('SUBMIT_UNCERTAIN', f'{exc}；自动核对队列，避免重复下发',
+                    db.log_event('SUBMIT_UNCERTAIN', f'{exc}；耗时{time.monotonic()-submit_start:.2f}秒；自动核对队列，避免重复下发',
                                  printer_id=pid, group_id=g['id'], task_id=task['id'])
                     break
                 self._save_tracking(g['id'], {'accepted': True, 'seen': False})
+                db.log_event('SUBMIT_RETURNED', f"{g['label']} 打印组件已返回；耗时{time.monotonic()-submit_start:.2f}秒；组件标识{job_id}（非 Windows 作业号）",
+                             printer_id=pid, group_id=g['id'], task_id=task['id'])
                 db.execute("UPDATE printers SET current_group=COALESCE(current_group,?),state='PRINTING' WHERE id=?", (g['id'], pid))
                 if not db.one('SELECT id FROM printer_run_sessions WHERE printer_id=? AND ended_at IS NULL', (pid,)):
                     db.execute('INSERT INTO printer_run_sessions(printer_id,group_id,started_at,start_counter) VALUES(?,?,?,?)',

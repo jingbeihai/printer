@@ -117,7 +117,7 @@ def confirm_pickup(local_task_id: int) -> bool:
 
 
 def cancel_by_cloud_ids(canceled_cloud_ids: list[int]):
-    """云端取消 → 本地停打并作废(当前小组停打由执行器在状态机中处理)。"""
+    """Cancel local tasks that have not been submitted to a printer."""
     for cid in canceled_cloud_ids:
         t = db.one("SELECT * FROM local_tasks WHERE cloud_id=? AND status NOT IN ('DONE','CANCELED')",
                    (cid,))

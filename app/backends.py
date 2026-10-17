@@ -179,11 +179,18 @@ class WindowsBackend(BackendBase):
             result = snmp or {"status": st, "page_counter": -1, "detail": f"win32 status={status}"}
             if st in ('offline', 'paper_out', 'jam'):
                 result['status'] = st
-            terminal = (getattr(win32print, 'JOB_STATUS_PRINTED', 0x80) |
-                        getattr(win32print, 'JOB_STATUS_COMPLETE', 0x1000) |
-                        getattr(win32print, 'JOB_STATUS_DELETED', 0x100))
+            def flag(name, default):
+                value = getattr(win32print, name, default)
+                return value if isinstance(value, int) else default
+            completed = flag('JOB_STATUS_PRINTED', 0x80) | flag('JOB_STATUS_COMPLETE', 0x1000)
+            failed = (flag('JOB_STATUS_ERROR', 0x2) | flag('JOB_STATUS_DELETING', 0x4) |
+                      flag('JOB_STATUS_DELETED', 0x100) | flag('JOB_STATUS_BLOCKED_DEVQ', 0x200))
             result['jobs'] = [{'id': job['JobId'], 'document': job.get('pDocument') or '',
-                               'finished': bool(job.get('Status', 0) & terminal)} for job in jobs]
+                               'status_code': job.get('Status', 0),
+                               'status_text': job.get('pStatus') or '',
+                               'printing': bool(job.get('Status', 0) & flag('JOB_STATUS_PRINTING', 0x10)),
+                               'failed': bool(job.get('Status', 0) & failed),
+                               'finished': bool(job.get('Status', 0) & completed)} for job in jobs]
             return result
         except Exception as e:  # noqa: BLE001
             return {"status": "offline", "page_counter": -1, "detail": str(e)}

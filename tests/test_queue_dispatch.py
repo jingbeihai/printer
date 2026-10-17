@@ -56,14 +56,13 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertEqual(self.backend.submit.call_count, 4)
         self.backend.cancel.assert_not_called()
 
-    def test_fast_jobs_finish_on_empty_queue_and_last_class_finishes_task(self):
+    def test_unobserved_fast_jobs_need_review_instead_of_false_completion(self):
         self.executor._assign()
         self.step('idle', [])
         self.executor._assign()
-        self.step('idle', [])
-        self.assertEqual(self.statuses(), ['DONE'] * 5)
-        self.assertEqual(db.one('SELECT status FROM local_tasks WHERE id=?', (self.tid,))['status'], 'DONE')
-        self.assertEqual(self.backend.submit.call_count, 5)
+        self.assertEqual(self.statuses(), ['PAUSED'] * 3 + ['QUEUED'] * 2)
+        self.assertEqual(self.backend.submit.call_count, 3)
+        self.assertEqual(db.one('SELECT status FROM local_tasks WHERE id=?', (self.tid,))['status'], 'PRINTING')
 
     def test_seen_job_survives_restart_and_completes_amid_unrelated_jobs(self):
         self.executor._assign()
@@ -98,14 +97,14 @@ class QueueDispatchTests(unittest.TestCase):
         self.executor._assign()
         self.assertEqual(self.statuses()[:3], ['PRINTING'] * 3)
 
-    def test_unrecognized_documents_wait_until_queue_drains_without_resubmission(self):
+    def test_unrecognized_documents_wait_until_queue_drains_then_need_review(self):
         self.executor._assign()
         self.step(jobs=[{'id': 1, 'document': 'driver-renamed-document'}])
         self.executor._assign()
         self.assertEqual(self.statuses()[:3], ['PRINTING'] * 3)
         self.assertEqual(self.backend.submit.call_count, 3)
         self.step('idle', [])
-        self.assertEqual(self.statuses()[:3], ['DONE'] * 3)
+        self.assertEqual(self.statuses()[:3], ['PAUSED'] * 3)
 
     def test_restart_with_unconfirmed_submission_does_not_resubmit(self):
         self.backend.submit.side_effect = TimeoutError('interrupted')
@@ -177,8 +176,20 @@ class QueueDispatchTests(unittest.TestCase):
         self.step('idle', jobs)
         self.assertEqual(self.statuses()[:3], ['DONE'] * 3)
         self.executor._assign()
-        self.step('idle', jobs)
+        final_jobs = jobs + [{'id': 4, 'document': '100-4.pdf', 'finished': True},
+                             {'id': 5, 'document': '100-5.pdf', 'finished': True}]
+        self.step('idle', final_jobs)
         self.assertEqual(self.statuses(), ['DONE'] * 5)
+
+    def test_windows_failed_job_does_not_become_done_after_disappearing(self):
+        self.executor._assign()
+        failed = [{'id': 21, 'document': '100-1.pdf', 'failed': True,
+                   'status_code': 2, 'status_text': 'Error', 'finished': False}]
+        self.step(jobs=failed + self.jobs(2, 3))
+        self.step('idle', [])
+        self.assertEqual(self.statuses()[0], 'PAUSED')
+        self.assertEqual(self.backend.submit.call_count, 3)
+        self.assertEqual(db.one("SELECT COUNT(*) n FROM events WHERE type='SPOOL_JOB_FAILED'")['n'], 1)
 
     def test_backend_reads_windows_jobs_even_with_snmp_status(self):
         win = Mock(JOB_STATUS_PRINTED=128, JOB_STATUS_COMPLETE=4096, JOB_STATUS_DELETED=256)
@@ -188,7 +199,9 @@ class QueueDispatchTests(unittest.TestCase):
                 WindowsBackend, 'installed_printers', return_value=[{'queue': 'A'}]), patch(
                 'app.backends._snmp_status', return_value={'status': 'idle', 'page_counter': 10}):
             info = WindowsBackend().poll({'queue_name': 'A', 'ip': '192.0.2.1'})
-        self.assertEqual(info['jobs'], [{'id': 7, 'document': '100-1.pdf', 'finished': True}])
+        self.assertEqual(info['jobs'], [{'id': 7, 'document': '100-1.pdf', 'status_code': 128,
+                                        'status_text': '', 'printing': False, 'failed': False,
+                                        'finished': True}])
         win.ClosePrinter.assert_called_once()
 
 
