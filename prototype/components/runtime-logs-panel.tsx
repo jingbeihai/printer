@@ -36,7 +36,7 @@ const pageSize=20;
 export function RuntimeLogsPanel({taskId,groupId,onClearScope}:{taskId?:number;groupId?:number;onClearScope?:()=>void}){
  const [logs,setLogs]=useState<RuntimeLog[]>([]),[error,setError]=useState(''),[query,setQuery]=useState('');
  const [onlyProblems,setOnlyProblems]=useState(false),[timeRange,setTimeRange]=useState('all'),[printer,setPrinter]=useState('all'),[eventType,setEventType]=useState('all');
- const [loading,setLoading]=useState(false),[page,setPage]=useState(1);
+ const [loading,setLoading]=useState(true),[page,setPage]=useState(1);
  async function refresh(){setLoading(true);try{setLogs(await loadRuntimeLogs(taskId,groupId));setError('')}catch(e){setError(e instanceof Error?e.message:'读取运行日志失败')}finally{setLoading(false)}}
  useEffect(()=>{void refresh()},[taskId,groupId]);
  const printers=useMemo(()=>Array.from(new Set(logs.map(log=>log.printer_name).filter((name):name is string=>Boolean(name)))).sort((a,b)=>a.localeCompare(b,'zh-CN')),[logs]);
@@ -53,28 +53,25 @@ export function RuntimeLogsPanel({taskId,groupId,onClearScope}:{taskId?:number;g
  useEffect(()=>setPage(1),[query,onlyProblems,timeRange,printer,eventType,taskId,groupId]);
  const pages=Math.max(1,Math.ceil(visible.length/pageSize)),currentPage=Math.min(page,pages),pageRows=visible.slice((currentPage-1)*pageSize,currentPage*pageSize);
  function resetFilters(){setQuery('');setOnlyProblems(false);setTimeRange('all');setPrinter('all');setEventType('all');onClearScope?.()}
- function download(){
-  const payload={exported_at:new Date().toISOString(),task_id:taskId??null,group_id:groupId??null,logs:visible};
-  const url=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}));
-  const a=document.createElement('a');a.href=url;a.download=`print-runtime-${Date.now()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
- }
  return <section className="panel runtime-logs-panel">
-  <div className="runtime-logs-heading"><div><h2>运行日志</h2><p>{taskId?`任务 #${taskId}${groupId?` · 班级作业 #${groupId}`:''}`:'本机打印站'} · 最近记录</p></div><div className="runtime-logs-actions"><button className="text-button" disabled={loading} onClick={()=>void refresh()}>{loading?'刷新中…':'刷新'}</button><button className="text-button" disabled={!visible.length} onClick={download}>导出诊断记录</button></div></div>
   <div className="runtime-logs-filters">
    <div className="runtime-logs-filter-grid">
     <label className="runtime-log-search"><span>搜索</span><input aria-label="搜索运行日志" placeholder="搜索任务、班级、打印机或错误" value={query} onChange={e=>setQuery(e.target.value)}/></label>
-    <label><span>时间范围</span><select value={timeRange} onChange={e=>setTimeRange(e.target.value)}><option value="all">全部时间</option><option value="today">今天</option><option value="week">近 7 天</option></select></label>
-    <label><span>打印机</span><select value={printer} onChange={e=>setPrinter(e.target.value)}><option value="all">全部设备</option>{printers.map(name=><option key={name} value={name}>{name}</option>)}</select></label>
-    <label><span>事件类型</span><select value={eventType} onChange={e=>setEventType(e.target.value)}><option value="all">全部事件</option>{['任务','打印与队列','设备','班级处理','其他'].map(name=><option key={name} value={name}>{name}</option>)}</select></label>
+    <label><span>时间范围</span><select aria-label="时间范围" value={timeRange} onChange={e=>setTimeRange(e.target.value)}><option value="all">全部时间</option><option value="today">今天</option><option value="week">近 7 天</option></select></label>
+    <label><span>打印机</span><select aria-label="打印机" value={printer} onChange={e=>setPrinter(e.target.value)}><option value="all">全部设备</option>{printers.map(name=><option key={name} value={name}>{name}</option>)}</select></label>
+    <label><span>事件类型</span><select aria-label="事件类型" value={eventType} onChange={e=>setEventType(e.target.value)}><option value="all">全部事件</option>{['任务','打印与队列','设备','班级处理','其他'].map(name=><option key={name} value={name}>{name}</option>)}</select></label>
+    <label className="runtime-log-problems"><input type="checkbox" checked={onlyProblems} onChange={e=>setOnlyProblems(e.target.checked)}/>只看异常</label>
+    <button className="text-button" disabled={loading} onClick={()=>void refresh()}>{loading?'刷新中…':'刷新'}</button>
+    <button className="text-button" onClick={resetFilters}>清除筛选</button>
    </div>
-   <div className="runtime-logs-filter-meta"><label className="runtime-log-problems"><input type="checkbox" checked={onlyProblems} onChange={e=>setOnlyProblems(e.target.checked)}/>只看异常</label>{taskId&&<span className="runtime-log-scope">任务 #{taskId}{groupId?` · 班级作业 #${groupId}`:''}</span>}<button className="text-button" onClick={resetFilters}>清除筛选</button><span className="runtime-log-count">最近读取 {logs.length} 条 · 符合条件 {visible.length} 条</span></div>
   </div>
   {error&&<p role="alert" className="station-notice">{error}</p>}
-  <div className="runtime-logs-list">
-   <div className="runtime-log-header"><span>时间</span><span>事件</span><span>详细内容</span></div>
-   {pageRows.map(log=>{const problem=isProblem(log),message=summary(log);return <article key={log.id} className={'runtime-log'+(problem?' problem':'')}><time dateTime={new Date(log.ts*1000).toISOString()}><span>{localDate(log.ts)}</span><strong>{localTime(log.ts)}</strong></time><div className="runtime-log-event"><strong>{eventName(log.type)}</strong><span className={'runtime-log-state'+(problem?' problem':'')}>{problem?'异常':'正常'}</span></div><div className="runtime-log-content"><strong>{log.title?`任务 #${log.cloud_id} · ${log.title}`:'打印站'}{log.group_label?` · ${log.group_label}`:''}{log.printer_name?` · ${log.printer_name}`:''}</strong><p>{message}</p>{message!==log.detail&&<details><summary>查看技术详情</summary><pre>{log.type} · {log.detail}</pre></details>}</div></article>})}
-   {!visible.length&&!loading&&<p className="runtime-log-empty">没有符合条件的记录</p>}
+  <div className="runtime-logs-list" aria-busy={loading}>
+   <div className="runtime-log-header"><span>时间</span><span>事件</span><span>打印机</span><span>详细内容</span></div>
+   {pageRows.map(log=>{const problem=isProblem(log),message=summary(log);return <article key={log.id} className={'runtime-log'+(problem?' problem':'')}><time dateTime={new Date(log.ts*1000).toISOString()}><span>{localDate(log.ts)}</span><strong>{localTime(log.ts)}</strong></time><div className="runtime-log-event"><strong>{eventName(log.type)}</strong><span className={'runtime-log-state'+(problem?' problem':'')}>{problem?'异常':'正常'}</span></div><div className="runtime-log-printer">{log.printer_name||'—'}</div><div className="runtime-log-content"><strong>{log.title?`任务 #${log.cloud_id} · ${log.title}`:'打印站'}{log.group_label?` · ${log.group_label}`:''}</strong><p>{message}</p>{message!==log.detail&&<details><summary>查看技术详情</summary><pre>{log.type} · {log.detail}</pre></details>}</div></article>})}
+   {loading&&!logs.length&&<p className="runtime-log-empty" role="status">正在读取运行日志…</p>}
+   {!visible.length&&!loading&&!error&&<p className="runtime-log-empty">没有符合条件的记录</p>}
   </div>
-  <div className="runtime-logs-footer"><span>日志记录程序与 Windows 队列反馈，实际结果请结合设备屏幕和出纸核对。</span><div><button disabled={currentPage===1} onClick={()=>setPage(currentPage-1)}>上一页</button><span>{currentPage} / {pages}</span><button disabled={currentPage===pages} onClick={()=>setPage(currentPage+1)}>下一页</button></div></div>
+  <div className="runtime-logs-footer"><span>{taskId?`任务 #${taskId}${groupId?` · 班级作业 #${groupId}`:''} · `:''}读取 {logs.length} 条 · 符合 {visible.length} 条</span><div><button disabled={currentPage===1} onClick={()=>setPage(currentPage-1)}>上一页</button><span>{currentPage} / {pages}</span><button disabled={currentPage===pages} onClick={()=>setPage(currentPage+1)}>下一页</button></div></div>
  </section>;
 }
