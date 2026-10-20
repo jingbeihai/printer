@@ -53,3 +53,5 @@
 .navigation-placeholder{display:flex;align-items:center;justify-content:center}.navigation-placeholder span{width:70%;height:14px;border-radius:5px;background:#edf1f7}.initialization-page{display:grid;place-items:center}.initialization-page>div{display:flex;flex-direction:column;align-items:center;gap:16px;text-align:center;padding:24px;max-width:480px}.initialization-page svg{color:#7196d9}.initialization-page p{color:#8190a4;line-height:1.7;overflow-wrap:anywhere}
 
 .fleet-class-tile.unconfirmed{background:#fff7e6;border-color:#e9c577;color:#805600}
+.update-section .row-actions a{display:inline-flex;align-items:center;text-decoration:none;border:1px solid #dce5f2;border-radius:6px;padding:7px 10px;font-size:12px}
+.update-install-steps{margin:0;padding-left:22px;color:#8190a4;font-size:12px;line-height:1.8}

@@ -188,7 +188,11 @@ def create_app() -> FastAPI:
         user = require_user(req)
         if not user:
             return None, JSONResponse({"ok": False, "error": "登录已失效"}, status_code=401)
-        return user, None
+        # 当前系统所有已登录用户都拥有统一的管理员操作权限；保留数据库
+        # 中的历史角色字段，仅用于兼容已有数据和管理页面。
+        effective = dict(user)
+        effective["role"] = ROLE_SUPERADMIN
+        return effective, None
 
     def api_task(row):
         task = dict(row)
@@ -304,8 +308,11 @@ def create_app() -> FastAPI:
         return user, None
 
     def public_users():
-        return [dict(row) for row in db.q(
+        users = [dict(row) for row in db.q(
             "SELECT id,username,role,active,display_name,created_at FROM users ORDER BY id")]
+        for user in users:
+            user["role"] = ROLE_SUPERADMIN
+        return users
 
     def admin_snapshot():
         return {"ok": True, "users": public_users(), "schools": school_presets(),
@@ -324,7 +331,7 @@ def create_app() -> FastAPI:
         body = await req.json()
         username = str(body.get("username", "")).strip()
         password = str(body.get("password", ""))
-        role = str(body.get("role", ROLE_USER))
+        role = ROLE_SUPERADMIN
         if not username or len(username) > 80 or len(password) < 8 or role not in (
                 ROLE_USER, ROLE_SUPERADMIN):
             return JSONResponse({"ok": False, "error": "用户名不能为空，密码至少 8 位，并请选择有效角色"}, status_code=400)
@@ -343,7 +350,7 @@ def create_app() -> FastAPI:
         if not target:
             return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
         body = await req.json()
-        role = str(body.get("role", target["role"]))
+        role = ROLE_SUPERADMIN
         active = body.get("active", bool(target["active"]))
         password = body.get("password", "")
         if role not in (ROLE_USER, ROLE_SUPERADMIN) or not isinstance(active, bool):

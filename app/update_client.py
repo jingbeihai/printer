@@ -54,7 +54,7 @@ class UpdateClient:
                 "disabled_reason": self.disabled_reason,
                 "download_percent": self.progress,
                 "update": self.doc and {key: self.doc.get(key) for key in
-                                         ("version", "sequence", "notes", "size")}}
+                                         ("version", "size", "url")}}
 
     def check(self):
         if not self.enabled:
