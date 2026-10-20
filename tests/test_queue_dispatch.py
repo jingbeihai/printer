@@ -1,4 +1,5 @@
 import json
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -63,6 +64,76 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertEqual(self.statuses(), ['PAUSED'] * 3 + ['QUEUED'] * 2)
         self.assertEqual(self.backend.submit.call_count, 3)
         self.assertEqual(db.one('SELECT status FROM local_tasks WHERE id=?', (self.tid,))['status'], 'PRINTING')
+
+    def test_short_jobs_are_observed_while_submit_is_blocked_and_all_five_finish(self):
+        executor = self.executor
+        class FastBackend:
+            def __init__(self):
+                self.path = None
+                self.seen = threading.Event()
+                self.calls = 0
+            def poll_queue(self, printer):
+                jobs = []
+                if self.path:
+                    jobs = [{'id': self.calls, 'document': self.path, 'finished': False}]
+                return {'status': 'printing', 'jobs': jobs}
+            def submit(self, printer, path):
+                self.calls += 1
+                self.path = path
+                # Wait for persisted evidence, not just a queue read.
+                for _ in range(200):
+                    gid = db.one('SELECT id FROM groups WHERE composed_path=?', (path,))['id']
+                    if executor._tracking(gid).get('seen'):
+                        self.path = None
+                        return 'submitted'
+                    self.seen.wait(.01)
+                raise AssertionError('observer did not run during submission')
+        self.executor.backend = FastBackend()
+        self.executor._assign()
+        self.step('idle', [])
+        self.executor._assign()
+        self.step('idle', [])
+        self.assertEqual(self.statuses(), ['DONE'] * 5)
+        self.assertEqual(self.executor.backend.calls, 5)
+
+    def test_fault_snapshot_preserves_job_evidence_and_raw_error(self):
+        self.executor._assign()
+        p = dict(db.one('SELECT * FROM printers WHERE id=?', (self.pid,)))
+        self.executor._step_printer(p, {'status': 'offline', 'detail': 'win32 status=2',
+                                       'jobs': self.jobs(1, 2, 3)})
+        self.assertEqual(self.statuses()[:3], ['PRINTING'] * 3)
+        self.assertIn('win32 status=2', db.one(
+            "SELECT detail FROM events WHERE type='PRINTER_STATE' ORDER BY id DESC")['detail'])
+        self.step('idle', [])
+        self.assertEqual(self.statuses()[:3], ['DONE'] * 3)
+
+    def test_failure_during_submit_is_retained_and_stops_prefetch(self):
+        executor = self.executor
+        ready = threading.Event()
+        gid = db.one('SELECT id FROM groups WHERE task_id=? ORDER BY seq', (self.tid,))['id']
+        class FailingBackend:
+            def poll_queue(self, printer):
+                return {'status': 'offline', 'detail': 'win32 status=2',
+                        'jobs': [{'id': 17, 'document': '100-1.pdf', 'failed': True}]}
+            def submit(self, printer, path):
+                for _ in range(200):
+                    if executor._tracking(gid).get('failed'):
+                        return 'submitted'
+                    ready.wait(.01)
+                raise AssertionError('failure not observed')
+        self.executor.backend = FailingBackend()
+        self.executor._assign()
+        self.step('idle', [])
+        self.executor._assign()
+        self.assertEqual(self.statuses(), ['PAUSED'] + ['QUEUED'] * 4)
+        self.assertEqual(self.executor._tracking(gid)['job_ids'], [17])
+
+    def test_known_job_id_survives_document_name_change(self):
+        self.executor._assign()
+        self.step(jobs=self.jobs(1, 2, 3))
+        self.step(jobs=[{'id': 1, 'document': 'driver renamed', 'failed': True}]+self.jobs(2, 3))
+        self.step('idle', [])
+        self.assertEqual(self.statuses()[0], 'PAUSED')
 
     def test_seen_job_survives_restart_and_completes_amid_unrelated_jobs(self):
         self.executor._assign()

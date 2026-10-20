@@ -37,7 +37,9 @@ if ($LASTEXITCODE -ne 0) { throw '客户端打包失败。' }
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name '印务台启动器' --distpath 'dist\_launcher' --workpath 'build\_launcher' --add-data 'app/update-channel.json;app' run_updater.py
 if ($LASTEXITCODE -ne 0) { throw '更新启动器打包失败。' }
 Copy-Item -LiteralPath 'dist\_launcher\印务台启动器.exe' -Destination 'dist\绍兴数知-印务台\印务台启动器.exe' -Force
+Copy-Item -LiteralPath 'install_client.ps1' -Destination 'dist\绍兴数知-印务台\install_client.ps1' -Force
 Copy-Item -LiteralPath 'install_client.ps1' -Destination 'dist\绍兴数知-印务台\安装客户端.ps1' -Force
+Copy-Item -LiteralPath '安装客户端.cmd' -Destination 'dist\绍兴数知-印务台\安装客户端.cmd' -Force
 python -c "import json; from pathlib import Path; from app.update_client import VERSION, SEQUENCE; Path('dist/绍兴数知-印务台/版本.json').write_text(json.dumps({'version': VERSION, 'sequence': SEQUENCE}), encoding='utf-8')"
 if ($LASTEXITCODE -ne 0) { throw '写入版本信息失败。' }
 Write-Host "已生成: $project\dist\绍兴数知-印务台\绍兴数知-印务台.exe"

@@ -51,3 +51,5 @@
 @media(max-width:640px){.runtime-log{grid-template-columns:85px minmax(0,1fr)}.runtime-log-printer{grid-column:1/-1;font-size:12px}.runtime-log-printer::before{content:'打印机：';color:#8291a4}.runtime-log-content{grid-column:1/-1}}
 
 .navigation-placeholder{display:flex;align-items:center;justify-content:center}.navigation-placeholder span{width:70%;height:14px;border-radius:5px;background:#edf1f7}.initialization-page{display:grid;place-items:center}.initialization-page>div{display:flex;flex-direction:column;align-items:center;gap:16px;text-align:center;padding:24px;max-width:480px}.initialization-page svg{color:#7196d9}.initialization-page p{color:#8190a4;line-height:1.7;overflow-wrap:anywhere}
+
+.fleet-class-tile.unconfirmed{background:#fff7e6;border-color:#e9c577;color:#805600}

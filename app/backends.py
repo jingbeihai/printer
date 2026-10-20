@@ -150,7 +150,11 @@ class WindowsBackend(BackendBase):
             raise RuntimeError(f"PDF 下发失败，打印组件返回代码 {result.returncode}")
         return f"win-{printer['id']}-{int(time.time())}"
 
-    def poll(self, printer):
+    def poll_queue(self, printer):
+        """Fast Windows-only snapshot for monitoring during PDF submission."""
+        return self.poll(printer, use_snmp=False)
+
+    def poll(self, printer, use_snmp=True):
         try:
             if printer["queue_name"] not in {item["queue"] for item in self.installed_printers()}:
                 return {"status": "offline", "page_counter": -1, "detail": "Windows 队列不存在"}
@@ -175,10 +179,11 @@ class WindowsBackend(BackendBase):
                 st = "printing"
             else:
                 st = "idle"
-            snmp = _snmp_status(printer.get("ip", ""))
+            snmp = _snmp_status(printer.get("ip", "")) if use_snmp else None
             result = snmp or {"status": st, "page_counter": -1, "detail": f"win32 status={status}"}
             if st in ('offline', 'paper_out', 'jam'):
                 result['status'] = st
+            result['detail'] = f"win32 status={status}; {result.get('detail', '')}"
             def flag(name, default):
                 value = getattr(win32print, name, default)
                 return value if isinstance(value, int) else default

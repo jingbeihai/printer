@@ -1,0 +1,10 @@
+.upload-class-summary{margin-top:18px;padding:12px 14px;border:1px solid #e3e9f1;border-radius:6px;background:#f5f7fa;font-size:13px;color:#526684;line-height:1.8;overflow-wrap:anywhere}
+.upload-class-summary>strong{display:block;color:#344661;margin-bottom:4px}
+.upload-footer .estimate{min-width:0}
+.upload-footer .submit-area{flex-wrap:wrap;justify-content:flex-end}
+.upload-footer .cover-choice{max-width:260px;line-height:1.5}
+.upload-footer .cover-choice input{flex:0 0 auto;width:16px;height:16px;padding:0}
+@media(max-width:700px){
+ .upload-footer .submit-area{width:100%;justify-content:flex-start}
+ .upload-footer .cover-choice{flex-basis:100%;max-width:none}
+}

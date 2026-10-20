@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import './queue.css';
+import './upload.css';
 export const metadata: Metadata = {
   title: '绍兴数知 · 印务台',
   icons: { icon: '/desk/favicon.svg' },

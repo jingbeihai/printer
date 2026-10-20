@@ -1,3 +1,4 @@
+﻿# Windows PowerShell 5 reads this file as UTF-8 with BOM.
 $ErrorActionPreference = 'Stop'
 $directory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launcher = Join-Path $directory '印务台启动器.exe'

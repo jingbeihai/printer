@@ -155,7 +155,7 @@ class StationRuntime:
         if status == 'DONE':
             display = 'done'
         elif status == 'PAUSED':
-            display = 'problem'
+            display = 'problem' if tracking.get('failed') else 'unconfirmed'
         elif status == 'PRINTING' and task_paused:
             display = 'paused'
         elif status == 'PRINTING' and tracking.get('printing'):

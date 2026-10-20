@@ -69,7 +69,7 @@ class Executor:
                 info = {'status': 'offline', 'detail': str(exc)}
             self._step_printer(printer, info)
 
-    def _step_printer(self, p, info):
+    def _step_printer(self, p, info, observe_only=False):
         pid = p['id']
         if p['state'] in ('QUARANTINED', 'MAINTENANCE', 'RESTING'):
             return
@@ -79,19 +79,20 @@ class Executor:
             db.execute('UPDATE printers SET page_counter=?,last_seen=? WHERE id=?',
                        (counter, time.time(), pid))
         faults = {'offline': PS.OFFLINE, 'paper_out': PS.WAIT_PAPER, 'jam': PS.SUSPECT}
-        if status in faults:
+        fault = status in faults
+        if fault and not observe_only:
             self._print_tick.pop(pid, None)
             if p['state'] != faults[status].value:
-                self._to(pid, faults[status], '设备异常，保留队列，恢复后自动继续')
-            return
-        if status == 'printing':
+                self._to(pid, faults[status], f"设备异常，保留队列，恢复后自动继续；{info.get('detail', '无详细信息')}")
+        if status == 'printing' and not observe_only:
             self._record_running(pid, p)
-        else:
+        elif not observe_only:
             self._print_tick.pop(pid, None)
         # No successful queue snapshot means no evidence for completion.
         jobs = info.get('jobs')
         if not isinstance(jobs, list):
-            self._to(pid, PS.OFFLINE, '无法读取 Windows 作业状态，等待重试')
+            if not observe_only and not fault:
+                self._to(pid, PS.OFFLINE, f"无法读取 Windows 作业状态，等待重试；{info.get('detail', '')}")
             return
         queue_drained = not any(not job.get('finished', False) for job in jobs)
         groups = db.q("SELECT g.* FROM groups g JOIN local_tasks t ON t.id=g.task_id "
@@ -102,13 +103,15 @@ class Executor:
                 db.execute("UPDATE groups SET status='QUEUED' WHERE id=?", (g['id'],))
                 continue
             expected = PureWindowsPath(g['composed_path']).name.casefold()
-            matches = [job for job in jobs if PureWindowsPath(job['document']).name.casefold() == expected]
             tracking = self._tracking(g['id'])
+            matches = [job for job in jobs if job['id'] in tracking.get('job_ids', [])
+                       or PureWindowsPath(job['document']).name.casefold() == expected]
             if matches:
                 if not tracking.get('seen'):
                     db.log_event('SPOOL_JOB_SEEN', f"{g['label']} Windows 作业号：{', '.join(str(job['id']) for job in matches)}",
                                  printer_id=pid, group_id=g['id'], task_id=g['task_id'])
-                tracking.update(accepted=True, seen=True)
+                tracking.update(accepted=True, seen=True,
+                                job_ids=sorted(set(tracking.get('job_ids', [])) | {job['id'] for job in matches}))
                 if any(job.get('printing') for job in matches) and not tracking.get('printing'):
                     tracking['printing'] = True
                     db.log_event('SPOOL_JOB_PRINTING', f"{g['label']} Windows 报告作业正在打印",
@@ -127,7 +130,9 @@ class Executor:
                 if tracking.get('failed'):
                     continue
                 db.execute("UPDATE groups SET status='PRINTING' WHERE id=?", (g['id'],))
-            elif tracking.get('failed'):
+            if observe_only or fault:
+                continue
+            if tracking.get('failed'):
                 continue
             elif not tracking['accepted']:
                 # Includes a restart between persisting intent and driver acknowledgement.
@@ -146,6 +151,8 @@ class Executor:
                 reason = ('Windows 报告作业处理完成' if matches else
                           '此前观察到的 Windows 作业已离开队列')
                 self._finish_group(g, reason)
+        if observe_only or fault:
+            return
         active = db.one("SELECT id FROM groups WHERE printer_id=? AND status='PRINTING' ORDER BY id LIMIT 1", (pid,))
         db.execute('UPDATE printers SET current_group=?,state=? WHERE id=?',
                    (active['id'] if active else None, 'PRINTING' if active or status == 'printing' else 'IDLE', pid))
@@ -219,6 +226,38 @@ class Executor:
                          "AND print_requested=1 AND paused=0 ORDER BY print_requested_at,id"):
             self._assign_task(task)
 
+    def _submit_observed(self, printer, path):
+        # Keep collecting evidence while Sumatra blocks. This observer never
+        # completes a class or dispatches work; the main loop reconciles later.
+        poll = getattr(type(self.backend), 'poll_queue', None)
+        if not callable(poll):
+            return self.backend.submit(printer, path)
+        stopped = threading.Event()
+        def observe():
+            last_error = None
+            while True:
+                try:
+                    info = self.backend.poll_queue(printer)
+                    if info.get('status') in ('offline', 'paper_out', 'jam') or not isinstance(info.get('jobs'), list):
+                        detail = f"{info.get('status')}: {info.get('detail', '无法读取队列')}"
+                        if detail != last_error:
+                            last_error = detail
+                            db.log_event('SPOOL_MONITOR_ERROR', detail, printer_id=printer['id'])
+                    self._step_printer(printer, info, observe_only=True)
+                except Exception as exc:
+                    if str(exc) != last_error:
+                        last_error = str(exc)
+                        db.log_event('SPOOL_MONITOR_ERROR', str(exc), printer_id=printer['id'])
+                if stopped.wait(0.1):
+                    break
+        worker = threading.Thread(target=observe, daemon=True)
+        worker.start()
+        try:
+            return self.backend.submit(printer, path)
+        finally:
+            stopped.set()
+            worker.join()
+
     def _assign_task(self, task):
         if task['id'] in self._halt_tasks:
             return
@@ -254,7 +293,7 @@ class Executor:
                              printer_id=pid, group_id=g['id'], task_id=task['id'])
                 submit_start = time.monotonic()
                 try:
-                    job_id = self.backend.submit(p, g['composed_path'])
+                    job_id = self._submit_observed(p, g['composed_path'])
                 except SubmissionNotStarted as exc:
                     db.execute("UPDATE groups SET status='QUEUED',started_at=NULL WHERE id=?", (g['id'],))
                     self._retry_after[pid] = time.time() + 10
@@ -265,7 +304,9 @@ class Executor:
                     db.log_event('SUBMIT_UNCERTAIN', f'{exc}；耗时{time.monotonic()-submit_start:.2f}秒；自动核对队列，避免重复下发',
                                  printer_id=pid, group_id=g['id'], task_id=task['id'])
                     break
-                self._save_tracking(g['id'], {'accepted': True, 'seen': False})
+                tracking = self._tracking(g['id'])
+                tracking['accepted'] = True
+                self._save_tracking(g['id'], tracking)
                 db.log_event('SUBMIT_RETURNED', f"{g['label']} 打印组件已返回；耗时{time.monotonic()-submit_start:.2f}秒；组件标识{job_id}（非 Windows 作业号）",
                              printer_id=pid, group_id=g['id'], task_id=task['id'])
                 db.execute("UPDATE printers SET current_group=COALESCE(current_group,?),state='PRINTING' WHERE id=?", (g['id'], pid))
@@ -274,3 +315,5 @@ class Executor:
                                (pid, g['id'], time.time(), p['page_counter']))
                 db.log_event('GROUP_ASSIGNED', f"{g['label']} → {p['name']}(作业{job_id})", printer_id=pid,
                              group_id=g['id'], task_id=task['id'])
+                if tracking.get('failed'):
+                    break
