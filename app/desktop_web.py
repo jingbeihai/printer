@@ -180,6 +180,22 @@ def create_desktop_app(cloud_url: str, station=None, updater=None) -> FastAPI:
     async def update_status(request: Request):
         return {'ok': True, **updater.status()} if updater else {'ok': True, 'enabled': False}
 
+    @app.get('/downloads/client-latest.zip')
+    async def client_download(request: Request):
+        """Proxy the public cloud download so the desktop link stays same-origin."""
+        try:
+            upstream = await run_in_threadpool(send, 'GET',
+                                               '/downloads/client-latest.zip', None, {})
+        except requests.RequestException:
+            return JSONResponse({'ok': False, 'error': '无法连接云端下载服务'}, status_code=502)
+        if upstream.status_code != 200:
+            return Response(upstream.content, status_code=upstream.status_code,
+                            media_type=upstream.headers.get('content-type', 'text/plain'))
+        response = Response(upstream.content, media_type='application/zip')
+        if upstream.headers.get('content-disposition'):
+            response.headers['Content-Disposition'] = upstream.headers['content-disposition']
+        return response
+
     def update_access(request: Request):
         if not request.cookies.get('pc_session'):
             return JSONResponse({'ok': False, 'error': '请先登录客户端'}, status_code=401)

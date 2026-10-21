@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import FastAPI, Form, Request, Response, UploadFile
-from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse)
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -113,6 +113,16 @@ def start_retention_thread():
 
 def create_app() -> FastAPI:
     app = FastAPI(title="打印集群·任务中心", docs_url=None, redoc_url=None)
+
+    @app.get("/downloads/client-latest.zip")
+    def client_download():
+        """Serve the latest client copied from the GitHub release asset."""
+        archive = config.RELEASE_DIR / "client-latest.zip"
+        if not archive.is_file():
+            return Response(status_code=404)
+        return FileResponse(archive, media_type="application/zip",
+                            filename="client-latest.zip",
+                            headers={"Cache-Control": "no-cache"})
 
     @app.get("/updates/stable.json")
     def client_update_manifest():

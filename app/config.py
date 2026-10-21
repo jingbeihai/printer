@@ -7,6 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("PRINT_DATA_DIR", BASE_DIR / "data"))
 UPLOAD_DIR = DATA_DIR / "uploads"       # 云端: 按日期归档原始PDF; 本地: 拉取到的PDF
 COMPOSED_DIR = DATA_DIR / "composed"    # 本地: 合成后的打印PDF
+RELEASE_DIR = DATA_DIR / "releases"     # 云端: 客户端发布 ZIP
 CLOUD_DB = DATA_DIR / "cloud.db"
 LOCAL_DB = DATA_DIR / "local.db"
 # 生产云端设置为 postgresql://user:password@127.0.0.1:5432/print_cluster。
@@ -44,7 +45,7 @@ SUMATRA_PATH = os.environ.get("SUMATRA_PATH", str(BASE_DIR / "tools" / "SumatraP
 
 
 def ensure_dirs():
-    for d in (DATA_DIR, UPLOAD_DIR, COMPOSED_DIR):
+    for d in (DATA_DIR, UPLOAD_DIR, COMPOSED_DIR, RELEASE_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
